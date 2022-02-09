@@ -181,6 +181,13 @@ class CheriStoreCond_r<bits<5> op, string opcodestr, RegisterClass rs2Class,
                         (ins rs2Class:$rs2, rs1Operand:$rs1),
                         opcodestr, "$rs2, $rs1">;
 
+let hasSideEffects = 0, mayLoad = 0, mayStore = 1 in
+class CheriStoreUninit_rr<bits<7> op, string opcodestr, RegisterClass rs2Class = GPR>
+    : RVInstR<op, 0b000, OPC_CHERI,
+               (outs GPCR:$rd),
+               (ins rs2Class:$rs2, GPCR:$rs1),
+               opcodestr, "$rd, $rs2, $rs1">;
+
 let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in
 class LR_C_r<bit aq, bit rl, bits<3> funct3, string opcodestr>
     : RVInstRAtomic<0b00010, aq, rl, funct3, OPC_AMO,
@@ -330,6 +337,10 @@ def PseudoCGetAddr : Pseudo<(outs GPR:$rd), (ins GPCR:$cs1), [],
                             "cgetaddr", "$rd, $cs1">;
 }
 
+let Predicates = [HasCheri,IsRV64] in {
+def CGetUninit : Cheri_r<0x19, "cgetuninit">;
+}
+
 //===----------------------------------------------------------------------===//
 // Capability-Modification Instructions
 //===----------------------------------------------------------------------===//
@@ -367,6 +378,13 @@ def CCSeal          : Cheri_rr<0x1f, "ccseal", GPCR, GPCR>;
 let defsCanBeSealed = 1 in
 def CSealEntry      : Cheri_r<0x11, "csealentry", GPCR>;
 } // let mayTrap = 1
+
+let Predicates = [HasCheri, IsRV64] in {
+def CUninit     : Cheri_r<0x1a, "cuninit", GPCR>;
+def CDropUninit : Cheri_r<0x1b, "cdropuninit", GPCR>;
+def CShrink     : Cheri_rr<0x22, "cshrink">;
+def CShrinkImm  : Cheri_ri<0x3, "cshrinkimm", 0>;
+}
 
 def : InstAlias<"cincoffsetimm $cd, $cs1, $imm",
                 (CIncOffsetImm GPCR:$cd, GPCR:$cs1, simm12:$imm), 0>;
@@ -615,6 +633,14 @@ def SC_C_CAP_64  : CheriStoreCond_r<0b11011, "sc.c.cap", GPCR, GPCRMemZeroOffset
 
 let Predicates = [HasCheri, HasStdExtA, IsRV64] in
 def SC_C_CAP_128 : CheriStoreCond_r<0b11100, "sc.c.cap", GPCR, GPCRMemZeroOffset>;
+
+let Predicates = [HasCheri, IsRV64] in {
+def USB_CAP : CheriStoreUninit_rr<0b1110111, "usb">;
+def USH_CAP : CheriStoreUninit_rr<0b1111000, "ush">;
+def USW_CAP : CheriStoreUninit_rr<0b1111001, "usw">;
+def USD_CAP : CheriStoreUninit_rr<0b1111010, "usd">;
+def USC_CAP : CheriStoreUninit_rr<0b1111011, "usc", GPCR>;
+}
 
 //===----------------------------------------------------------------------===//
 // Memory-Access Instructions
