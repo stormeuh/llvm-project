@@ -662,6 +662,7 @@ CXCallingConv clang_getFunctionTypeCallingConv(CXType X) {
       TCALLINGCONV(CHERICCall);
       TCALLINGCONV(CHERICCallback);
       TCALLINGCONV(CHERICCallee);
+      TCALLINGCONV(CHERIUninit);
       TCALLINGCONV(X86StdCall);
       TCALLINGCONV(X86FastCall);
       TCALLINGCONV(X86ThisCall);

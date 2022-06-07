@@ -260,6 +260,13 @@ namespace CallingConv {
     /// argument, zeroes all unused return registers on return.
     CHERI_CCallee = 103,
 
+    /// CHERI_Uninit - Calling convention leveraging uninitialized capabilities
+    /// as described in Georges, A. L., Guéneau, A., Van Strydonck, T., Timany,
+    /// A., Trieu, A., Huyghebaert, S., ... & Birkedal, L. (2021). Efficient and
+    /// provable local capability revocation using uninitialized capabilities.
+    /// Proc. ACM Program. Lang., 5(POPL), 1-30.
+    CHERI_Uninit = 104,
+
     /// The highest possible calling convention ID. Must be some 2^k - 1.
     MaxID = 1023
   };

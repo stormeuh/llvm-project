@@ -276,6 +276,7 @@ namespace clang {
     CC_CHERICCall,  // __attribute__((cheri_ccall))
     CC_CHERICCallee,// __attribute__((cheri_ccallee))
     CC_CHERICCallback,// __attribute__((cheri_ccallback))
+    CC_CHERIUninit, // __attribute__((cheri_uninit))
     CC_IntelOclBicc, // __attribute__((intel_ocl_bicc))
     CC_SpirFunction, // default for OpenCL functions on SPIR target
     CC_OpenCLKernel, // inferred for OpenCL kernels
@@ -302,6 +303,7 @@ namespace clang {
     case CC_OpenCLKernel:
     case CC_Swift:
     case CC_SwiftAsync:
+    case CC_CHERIUninit:
       return false;
     default:
       return true;

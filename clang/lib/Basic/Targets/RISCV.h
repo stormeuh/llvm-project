@@ -231,6 +231,17 @@ public:
   }
 
   uint64_t getPointerRangeForCHERICapability() const override { return 64; }
+
+  CallingConvCheckResult checkCallingConvention(CallingConv CC) const override {
+    switch (CC) {
+    case CC_C:
+    case CC_CHERICCall:
+    case CC_CHERIUninit:
+      return CCCR_OK;
+    default:
+      return CCCR_Warning;
+    }
+  }
 };
 } // namespace targets
 } // namespace clang

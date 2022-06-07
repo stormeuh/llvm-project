@@ -3485,6 +3485,7 @@ enum CXCallingConv {
   CXCallingConv_CHERICCall = 80,
   CXCallingConv_CHERICCallee = 81,
   CXCallingConv_CHERICCallback = 82,
+  CXCallingConv_CHERIUninit = 83,
 
   CXCallingConv_Invalid = 100,
   CXCallingConv_Unexposed = 200

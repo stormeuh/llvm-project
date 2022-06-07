@@ -3178,6 +3178,7 @@ StringRef CXXNameMangler::getCallingConvQualifierName(CallingConv CC) {
   case CC_CHERICCall:
   case CC_CHERICCallee:
   case CC_CHERICCallback:
+  case CC_CHERIUninit:
     // FIXME: we should be mangling all of the above.
     return "";
 

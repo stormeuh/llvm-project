@@ -52,6 +52,7 @@ unsigned CodeGenTypes::ClangCallConvToLLVMCallConv(CallingConv CC) {
   case CC_CHERICCallback:
     return llvm::CallingConv::CHERI_CCall;
   case CC_CHERICCallee: return llvm::CallingConv::CHERI_CCallee;
+  case CC_CHERIUninit: return llvm::CallingConv::CHERI_Uninit;
   case CC_X86StdCall: return llvm::CallingConv::X86_StdCall;
   case CC_X86FastCall: return llvm::CallingConv::X86_FastCall;
   case CC_X86RegCall: return llvm::CallingConv::X86_RegCall;
@@ -236,6 +237,9 @@ static CallingConv getCallingConventionForDecl(const ObjCMethodDecl *D,
 
   if (D->hasAttr<CHERICCallbackAttr>())
     return CC_CHERICCallback;
+
+  if (D->hasAttr<CHERIUninitAttr>())
+    return CC_CHERIUninit;
 
   if (D->hasAttr<AArch64VectorPcsAttr>())
     return CC_AArch64VectorCall;

@@ -2356,6 +2356,12 @@ def CHERICCallback : DeclOrTypeAttr { // InheritableAttr {
   let Documentation = [Undocumented];
 }
 
+def CHERIUninit : DeclOrTypeAttr { // InheritableAttr {
+  let Spellings = [GNU<"cheri_uninit">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [CHERIUninitDocs];
+}
+
 def CHERIMethodSuffix : DeclOrTypeAttr { // InheritableAttr {
   let Spellings = [GNU<"cheri_method_suffix">];
   let Documentation = [Undocumented];

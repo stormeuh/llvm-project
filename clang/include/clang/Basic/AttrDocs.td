@@ -6633,7 +6633,18 @@ The values ``thunk`` and ``thunk-inline`` from GCC are not supported.
 
 The symbol used for ``thunk-extern`` is target specific:
 * X86: ``__x86_return_thunk``
-
 As such, this function attribute is currently only supported on X86 targets.
+  }];
+}
+
+
+def CHERIUninitDocs : Documentation {
+  let Category = DocCatCallingConvs;
+  let Content = [{
+  Calling convention available on CHERI PureCap targets. Makes use of uninitialized
+  capabilities to enforce local state encapsulation and well-bracketed control flow.
+  Assigning the ``cheri_uninit`` attribute to a function will make any call to that
+  function use the uninitialized capability calling convention.
+  See https://dl.acm.org/doi/pdf/10.1145/3434287
   }];
 }

@@ -11446,11 +11446,17 @@ SDValue RISCVTargetLowering::LowerFormalArguments(
   case CallingConv::C:
   case CallingConv::Fast:
     break;
+  case CallingConv::CHERI_Uninit:
+    if (!RISCVABI::isCheriPureCapABI(Subtarget.getTargetABI()))
+      report_fatal_error(
+          "Uninitialised calling convention not defined on non-purecap targets");
+    break;
   case CallingConv::GHC:
     if (!MF.getSubtarget().getFeatureBits()[RISCV::FeatureStdExtF] ||
-        !MF.getSubtarget().getFeatureBits()[RISCV::FeatureStdExtD])
+        !MF.getSubtarget().getFeatureBits()[RISCV::FeatureStdExtD]) {
       report_fatal_error(
         "GHC calling convention requires the F and D instruction set extensions");
+    }
   }
 
   const Function &Func = MF.getFunction();
@@ -11700,6 +11706,8 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
   if (CallConv == CallingConv::GHC)
     ArgCCInfo.AnalyzeCallOperands(Outs, CC_RISCV_GHC);
+  else if (CallConv == CallingConv::CHERI_Uninit)
+    analyzeOutputArgs(MF, ArgCCInfo, Outs, /*IsRet=*/false, &CLI, CC_RISCV);
   else
     analyzeOutputArgs(MF, ArgCCInfo, Outs, /*IsRet=*/false, &CLI,
                       CallConv == CallingConv::Fast ? CC_RISCV_FastCC

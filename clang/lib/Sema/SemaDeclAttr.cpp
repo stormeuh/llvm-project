@@ -5126,6 +5126,9 @@ static void handleCallConvAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   case ParsedAttr::AT_CHERICCallback:
     D->addAttr(::new (S.Context) CHERICCallbackAttr(S.Context, AL));
     return;
+  case ParsedAttr::AT_CHERIUninit:
+    D->addAttr(::new (S.Context) CHERIUninitAttr(S.Context, AL));
+    return;
   case ParsedAttr::AT_AArch64VectorPcs:
     D->addAttr(::new (S.Context) AArch64VectorPcsAttr(S.Context, AL));
     return;
@@ -5335,6 +5338,9 @@ bool Sema::CheckCallingConvAttr(const ParsedAttr &Attrs, CallingConv &CC,
     break;
   case ParsedAttr::AT_CHERICCallback:
     CC = CC_CHERICCallback;
+    break;
+  case ParsedAttr::AT_CHERIUninit:
+    CC = CC_CHERIUninit;
     break;
   case ParsedAttr::AT_IntelOclBicc:
     CC = CC_IntelOclBicc;
@@ -9020,6 +9026,7 @@ ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D, const ParsedAttr &AL,
   case ParsedAttr::AT_CHERICCall:
   case ParsedAttr::AT_CHERICCallee:
   case ParsedAttr::AT_CHERICCallback:
+  case ParsedAttr::AT_CHERIUninit:
   case ParsedAttr::AT_FastCall:
   case ParsedAttr::AT_ThisCall:
   case ParsedAttr::AT_Pascal:
