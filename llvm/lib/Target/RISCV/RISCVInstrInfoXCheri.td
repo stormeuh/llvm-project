@@ -469,6 +469,7 @@ def : InstAlias<"cspecialw $scr, $cs",
 //===----------------------------------------------------------------------===//
 
 let Predicates = [HasCheri], hasSideEffects = 1 in {
+def Clear   : Cheri_clear<0xd, "clear">;
 def CClear  : Cheri_clear<0xe, "cclear">;
 def FPClear : Cheri_clear<0x10, "fpclear">;
 }
@@ -1131,6 +1132,14 @@ def : InstAlias<"c.cincoffsetimm16csp $rd, $imm",
 //===----------------------------------------------------------------------===//
 // Pseudo-instructions and codegen patterns
 //===----------------------------------------------------------------------===//
+
+
+def SDT_RISCVClearRegs : SDTypeProfile<0, 0, []>;
+def riscv_clear_regs : SDNode<"RISCVISD::CLEAR_REGS", SDT_RISCVClearRegs,
+[SDNPHasChain, SDNPOptInGlue, SDNPOutGlue, SDNPVariadic]>;
+
+let Predicates = [HasCheri, IsCapMode], hasSideEffects = 1, Size = 16 in
+def PseudoCClear : Pseudo<(outs), (ins), [(riscv_clear_regs)]>;
 
 let Predicates = [HasCheri, IsCapMode] in {
 let hasSideEffects = 0, mayLoad = 0, mayStore = 0, isCodeGenOnly = 0,

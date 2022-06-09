@@ -54,6 +54,8 @@ RISCVRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   auto &Subtarget = MF->getSubtarget<RISCVSubtarget>();
   if (MF->getFunction().getCallingConv() == CallingConv::GHC)
     return CSR_NoRegs_SaveList;
+  if (MF->getFunction().getCallingConv() == CallingConv::CHERI_Uninit)
+    return CSR_CHERI_Uninit_SaveList;
   if (MF->getFunction().hasFnAttribute("interrupt")) {
     if (Subtarget.hasStdExtD())
       return Subtarget.hasCheri() ? CSR_XLEN_CLEN_F64_Interrupt_SaveList
@@ -345,6 +347,8 @@ RISCVRegisterInfo::getCallPreservedMask(const MachineFunction & MF,
 
   if (CC == CallingConv::GHC)
     return CSR_NoRegs_RegMask;
+  if (CC == CallingConv::CHERI_Uninit)
+    return CSR_CHERI_Uninit_RegMask;
   switch (Subtarget.getTargetABI()) {
   default:
     llvm_unreachable("Unrecognized ABI");

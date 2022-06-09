@@ -82,6 +82,9 @@ private:
                          MachineBasicBlock::iterator MBBI, unsigned Opcode);
   bool expandVSPILL(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI);
   bool expandVRELOAD(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI);
+  bool expandPseudoCClear(MachineBasicBlock &MBB,
+                          MachineBasicBlock::iterator MBBI,
+                          MachineBasicBlock::iterator &NextMBBI);
 };
 
 char RISCVExpandPseudo::ID = 0;
@@ -114,6 +117,8 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
   // expanded instructions for each pseudo is correct in the Size field of the
   // tablegen definition for the pseudo.
   switch (MBBI->getOpcode()) {
+  case RISCV::PseudoCClear:
+    return expandPseudoCClear(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLLA:
     return expandLoadLocalAddress(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLA:
@@ -181,6 +186,50 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
   }
 
   return false;
+}
+
+bool RISCVExpandPseudo::expandPseudoCClear(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+    MachineBasicBlock::iterator &NextMBBI
+    ) {
+//  MachineFunction *MF = MBB.getParent();
+  MachineInstr &MI = *MBBI;
+  DebugLoc DL = MI.getDebugLoc();
+
+  // retrieve register mask operand from pseudo
+  const uint32_t *RegMask = MI.getOperand(0).getRegMask();
+  // The register mask is indexed by the RISCV register enum, which causes the
+  // capability register mask to be
+  // base mask is used to specify registers which may never be cleared
+  // set DDC not to be cleared by default
+  const uint32_t CapBaseMask = 0xfffffffe;
+//  const uint32_t FloatBaseMask = 0xffffffff;
+  uint32_t CapClearMask = 0;
+//  uint32_t FloatClearMask = 0;
+  static_assert(sizeof(CapClearMask) == sizeof(*RegMask), "");
+  const uint32_t MaskWidth = sizeof(CapClearMask) * 8;
+
+  const auto C0WordIdx = RISCV::C0 / MaskWidth;
+  const auto C0WordOff = RISCV::C0 % MaskWidth;
+  CapClearMask = CapClearMask | (CapBaseMask &
+    // set bits from lower register mask word
+    (RegMask[C0WordIdx] >> C0WordOff));
+  CapClearMask = CapClearMask | (CapBaseMask &
+    // set bits from higher register mask word
+    (RegMask[C0WordIdx+1] << (MaskWidth - C0WordOff)));
+
+  for (int I = 0; I < 4; I++){
+    uint8_t CapMaskSegment = (CapClearMask >> (I * 8));
+//    uint8_t FPRegMaskSegment = (RegMask >> (i * 8));
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CClear))
+        .addImm(I)
+        .addImm(CapMaskSegment);
+//    BuildMI(NewMBB, DL, TII->get(RISCV::FPClear))
+//        .addImm(i)
+//        .addImm(FPRegMaskSegment);
+  }
+  MI.eraseFromParent();
+  return true;
 }
 
 bool RISCVExpandPseudo::expandAuipcInstPair(

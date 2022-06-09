@@ -44,6 +44,7 @@ using namespace llvm;
 
 #define DEBUG_TYPE "riscv-lower"
 
+#define CHERI_UNINIT_CCLEAR
 STATISTIC(NumTailCalls, "Number of tail calls");
 
 static cl::opt<bool>
@@ -11432,6 +11433,35 @@ static bool CC_RISCV_GHC(unsigned ValNo, MVT ValVT, MVT LocVT,
   return true;
 }
 
+static uint32_t *getCallClearMask(
+    const SmallVectorImpl<CCValAssign> &ArgLocs) {
+  uint32_t *TempMask = new uint32_t[(RISCV::NUM_TARGET_REGS / 32) + 1];
+  const auto MaskWidth = sizeof(uint32_t) * 8;
+  const auto C0WordIdx = RISCV::C0 / MaskWidth;
+  const auto C0WordOff = RISCV::C0 % MaskWidth;
+  // default set all registers to be cleared
+  TempMask[C0WordIdx] = 0xffffffff << C0WordOff;
+  TempMask[C0WordIdx + 1] = 0xffffffff >> (MaskWidth - C0WordOff);
+  SmallVector<Register, 32> NoClearRegs;
+  NoClearRegs.push_back(RISCV::C1);
+  NoClearRegs.push_back(RISCV::C2);
+  NoClearRegs.push_back(RISCV::C8);
+  for (const CCValAssign ArgLoc : ArgLocs) {
+    if (ArgLoc.isRegLoc()) {
+      // TODO: merged register bank is presumed for now
+      if (ArgLoc.getLocReg() > RISCV::X0 && ArgLoc.getLocReg() <= RISCV::X31)
+        NoClearRegs.push_back(ArgLoc.getLocReg() - (RISCV::X0 - RISCV::C0));
+      else NoClearRegs.push_back(ArgLoc.getLocReg());
+    }
+  }
+  // unset all argument registers
+  for (const Register Reg : NoClearRegs) {
+    auto RegWordIdx = Reg / MaskWidth;
+    auto RegWordOff = Reg % MaskWidth;
+    TempMask[RegWordIdx] = TempMask[RegWordIdx] ^ (1 << RegWordOff);
+  }
+  return TempMask;
+}
 // Transform physical registers into virtual registers.
 SDValue RISCVTargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
@@ -11940,6 +11970,19 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
       Callee = DAG.getTargetExternalFunctionSymbol(S->getSymbol(), OpFlags);
   }
 
+#ifdef CHERI_UNINIT_CCLEAR
+  // Emit register clearing node
+  if (CallConv == CallingConv::CHERI_Uninit) {
+    SmallVector<SDValue, 8> Ops;
+    const uint32_t *ClearMask = getCallClearMask(ArgLocs);
+    Ops.push_back(Chain);
+    Ops.push_back(DAG.getRegisterMask(ClearMask));
+    if (Glue.getNode()) Ops.push_back(Glue);
+    SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
+    Chain = DAG.getNode(RISCVISD::CLEAR_REGS, DL, NodeTys, Ops);
+    Glue = Chain.getValue(1);
+  }
+#endif
   // The first call operand is the chain and the second is the target address.
   SmallVector<SDValue, 8> Ops;
   Ops.push_back(Chain);
@@ -12332,6 +12375,7 @@ const char *RISCVTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(READ_CSR)
   NODE_NAME_CASE(WRITE_CSR)
   NODE_NAME_CASE(SWAP_CSR)
+  NODE_NAME_CASE(CLEAR_REGS)
   }
   // clang-format on
   return nullptr;
