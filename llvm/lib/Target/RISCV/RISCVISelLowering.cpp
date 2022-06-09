@@ -12,8 +12,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "RISCVISelLowering.h"
-#include "MCTargetDesc/RISCVMatInt.h"
 #include "MCTargetDesc/RISCVCompressedCap.h"
+#include "MCTargetDesc/RISCVMatInt.h"
 #include "RISCV.h"
 #include "RISCVMachineFunctionInfo.h"
 #include "RISCVRegisterInfo.h"
@@ -26,6 +26,7 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
+#include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
 #include "llvm/CodeGen/ValueTypes.h"
@@ -34,6 +35,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/IntrinsicsRISCV.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/MC/MCContext.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/KnownBits.h"
@@ -45,6 +47,8 @@ using namespace llvm;
 #define DEBUG_TYPE "riscv-lower"
 
 #define CHERI_UNINIT_CCLEAR
+#define CHERI_UNINIT_ACTREC
+
 STATISTIC(NumTailCalls, "Number of tail calls");
 
 static cl::opt<bool>
@@ -11437,15 +11441,14 @@ static uint32_t *getCallClearMask(
     const SmallVectorImpl<CCValAssign> &ArgLocs) {
   uint32_t *TempMask = new uint32_t[(RISCV::NUM_TARGET_REGS / 32) + 1];
   const auto MaskWidth = sizeof(uint32_t) * 8;
-  const auto C0WordIdx = RISCV::C0 / MaskWidth;
-  const auto C0WordOff = RISCV::C0 % MaskWidth;
-  // default set all registers to be cleared
-  TempMask[C0WordIdx] = 0xffffffff << C0WordOff;
-  TempMask[C0WordIdx + 1] = 0xffffffff >> (MaskWidth - C0WordOff);
-  SmallVector<Register, 32> NoClearRegs;
-  NoClearRegs.push_back(RISCV::C1);
-  NoClearRegs.push_back(RISCV::C2);
-  NoClearRegs.push_back(RISCV::C8);
+  // default set no registers will be preserved
+  for (size_t I = 0; I < (RISCV::NUM_TARGET_REGS / 32) + 1; I++) TempMask[I] = 0;
+  SmallVector<Register, 32> NoClearRegs = {
+      RISCV::C0, RISCV::X0,
+      RISCV::C1, RISCV::X1,
+      RISCV::C2, RISCV::X2,
+      RISCV::C8, RISCV::X8
+  };
   for (const CCValAssign ArgLoc : ArgLocs) {
     if (ArgLoc.isRegLoc()) {
       // TODO: merged register bank is presumed for now
@@ -11458,10 +11461,65 @@ static uint32_t *getCallClearMask(
   for (const Register Reg : NoClearRegs) {
     auto RegWordIdx = Reg / MaskWidth;
     auto RegWordOff = Reg % MaskWidth;
-    TempMask[RegWordIdx] = TempMask[RegWordIdx] ^ (1 << RegWordOff);
+    TempMask[RegWordIdx] = TempMask[RegWordIdx] | (1 << RegWordOff);
   }
   return TempMask;
 }
+
+static SmallVector<uint64_t, 3> ActrecCode = {
+  0x0302a08f020002db,
+  0x0182a3030202a10f,
+  0x000080672261045b
+};
+
+static unsigned ActrecCodeSize = 8 * ActrecCode.size();
+
+SDValue emitActivationRecordCode(SDValue Chain, SDLoc &DL, SelectionDAG &DAG, SDValue ActrecPtr) {
+  MVT DWVT = MVT::getIntegerVT(64);
+  SDValue OutChain = Chain;
+  SDValue NextPtr = ActrecPtr;
+  for(auto ActrecElem = ActrecCode.begin(); ActrecElem != ActrecCode.end(); ++ActrecElem){
+    SDValue ActrecConst = DAG.getConstant(*ActrecElem, DL, DWVT);
+    OutChain = DAG.getStore(OutChain, DL, ActrecConst, NextPtr, MachinePointerInfo());
+    if (ActrecElem + 1 != ActrecCode.end())
+      NextPtr = DAG.getPointerAdd(DL, NextPtr, 8);
+  }
+  return OutChain;
+}
+
+std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(SDValue Chain, SDLoc &DL, SelectionDAG &DAG, MachineFunction &MF, EVT PtrVT, EVT XLenVT) {
+  // factor sizing information out of code below
+  unsigned XLenVTSize = XLenVT.getFixedSizeInBits()/8;
+  unsigned PtrVTSize = PtrVT.getFixedSizeInBits()/8;
+  unsigned ActrecSize = ActrecCodeSize + XLenVTSize + PtrVTSize * 2;
+  // create stack object and obtain pointer to it
+  Align PtrVTAlign = MF.getSubtarget<RISCVSubtarget>().getRegisterInfo()->getSpillAlign(RISCV::GPCRRegClass);
+  int FI = MF.getFrameInfo().CreateStackObject(ActrecSize, PtrVTAlign, /*isSS*/ false);
+  // emit code portion of activation record and advance pointer
+  SDValue ActrecPtr = DAG.getFrameIndex(FI, PtrVT);
+  SDValue OutChain = emitActivationRecordCode(Chain, DL, DAG, ActrecPtr);
+  // emit frame pointer offset calculation, store and advance pointer
+  SDValue NextPtr = DAG.getPointerAdd(DL, ActrecPtr, ActrecCodeSize);
+  SDValue FPOffset = DAG.getNode(ISD::SUB, DL, XLenVT,
+                                 DAG.getRegister(RISCV::X8, XLenVT),
+                                 DAG.getRegister(RISCV::X2, XLenVT));
+  OutChain = DAG.getStore(OutChain, DL, FPOffset, NextPtr, MachinePointerInfo());
+  // emit stack capability store and advance pointer
+  NextPtr = DAG.getPointerAdd(DL, NextPtr, XLenVTSize);
+  SDValue CSPReg = DAG.getRegister(RISCV::C2, PtrVT);
+  OutChain = DAG.getStore(OutChain, DL, CSPReg, NextPtr, MachinePointerInfo(200));
+  // create placeholder for return address, to be filled in later when node actually exists
+  NextPtr = DAG.getPointerAdd(DL, NextPtr, PtrVTSize);
+  // Get first forward directional label (which should be positioned right after the call)
+  MCSymbol *RLabel = MF.getMMI().getContext().createDirectionalLocalSymbol(1);
+  // setting this symbol to have xlenvt is stupid, but it is what the tablegen backend expects
+  // to fix, see definition of bare_symbol in RISCVInstrFormats.td
+  SDValue RAAddrSym = DAG.getMCSymbol(RLabel, XLenVT);
+  SDValue RAAddr = SDValue(DAG.getMachineNode(RISCV::PseudoCLLC, DL, PtrVT, RAAddrSym), 0);
+  OutChain = DAG.getStore(OutChain, DL, RAAddr, NextPtr, MachinePointerInfo(), PtrVTAlign);
+  return std::make_tuple(OutChain, ActrecPtr, RAAddrSym);
+}
+
 // Transform physical registers into virtual registers.
 SDValue RISCVTargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
@@ -11783,6 +11841,15 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   if (!IsTailCall)
     Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, CLI.DL);
 
+#ifdef CHERI_UNINIT_ACTREC
+  std::tuple<SDValue, SDValue, SDValue> ActrecNodes;
+  // Emit activation record onto the stack
+  if (CallConv == CallingConv::CHERI_Uninit) {
+    ActrecNodes = emitActivationRecord(Chain, DL, DAG, MF, PtrVT, XLenVT);
+    Chain = std::get<0>(ActrecNodes);
+  }
+#endif
+
   // Copy argument values to their designated locations.
   SmallVector<std::pair<Register, SDValue>, 8> RegsToPass;
   SmallVector<SDValue, 8> MemOpChains;
@@ -11983,10 +12050,27 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     Glue = Chain.getValue(1);
   }
 #endif
+
+#ifdef CHERI_UNINIT_ACTREC
+  if (CallConv == CallingConv::CHERI_Uninit) {
+    // install activation record code as return address
+    SDValue ActrecPtr = std::get<1>(ActrecNodes);
+    Chain = DAG.getCopyToReg(Chain, DL, RISCV::C1, ActrecPtr, Glue);
+    Glue = Chain.getValue(1);
+  }
+#endif
+
   // The first call operand is the chain and the second is the target address.
   SmallVector<SDValue, 8> Ops;
   Ops.push_back(Chain);
   Ops.push_back(Callee);
+
+#ifdef CHERI_UNINIT_ACTREC
+  // Add return symbol to the arguments
+  if (CallConv == CallingConv::CHERI_Uninit) {
+    Ops.push_back(std::get<2>(ActrecNodes));
+  }
+#endif
 
   // Add argument registers to the end of the list so that they are
   // known live into the call.
@@ -12016,9 +12100,14 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
       return DAG.getNode(RISCVISD::TAIL, DL, NodeTys, Ops);
   }
 
-  if (RISCVABI::isCheriPureCapABI(Subtarget.getTargetABI()))
-    Chain = DAG.getNode(RISCVISD::CAP_CALL, DL, NodeTys, Ops);
-  else
+  if (RISCVABI::isCheriPureCapABI(Subtarget.getTargetABI())) {
+#ifdef CHERI_UNINIT_ACTREC
+    if (CallConv == CallingConv::CHERI_Uninit) {
+      Chain = DAG.getNode(RISCVISD::UNINIT_CALL, DL, NodeTys, Ops);
+    } else
+#endif
+      Chain = DAG.getNode(RISCVISD::CAP_CALL, DL, NodeTys, Ops);
+  } else
     Chain = DAG.getNode(RISCVISD::CALL, DL, NodeTys, Ops);
 
   DAG.addNoMergeSiteInfo(Chain.getNode(), CLI.NoMerge);
@@ -12376,6 +12465,7 @@ const char *RISCVTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(WRITE_CSR)
   NODE_NAME_CASE(SWAP_CSR)
   NODE_NAME_CASE(CLEAR_REGS)
+  NODE_NAME_CASE(UNINIT_CALL)
   }
   // clang-format on
   return nullptr;

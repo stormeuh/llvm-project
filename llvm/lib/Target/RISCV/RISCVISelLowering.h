@@ -121,6 +121,7 @@ enum NodeType : unsigned {
   READ_CYCLE_WIDE,
   CAP_CALL,
   CAP_TAIL,
+  UNINIT_CALL,
   /// Legalised int_cheri_cap_tag_get
   CAP_TAG_GET,
   /// Legalised int_cheri_cap_sealed_get

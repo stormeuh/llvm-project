@@ -19,6 +19,7 @@
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/MC/MCContext.h"
 
 using namespace llvm;
 
@@ -85,6 +86,9 @@ private:
   bool expandPseudoCClear(MachineBasicBlock &MBB,
                           MachineBasicBlock::iterator MBBI,
                           MachineBasicBlock::iterator &NextMBBI);
+  bool expandPseudoUCCALL(MachineBasicBlock &block,
+                          MachineBasicBlock::iterator iterator,
+                          MachineBasicBlock::iterator &iterator1);
 };
 
 char RISCVExpandPseudo::ID = 0;
@@ -119,6 +123,8 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
   switch (MBBI->getOpcode()) {
   case RISCV::PseudoCClear:
     return expandPseudoCClear(MBB, MBBI, NextMBBI);
+  case RISCV::PseudoUCCALL:
+    return expandPseudoUCCALL(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLLA:
     return expandLoadLocalAddress(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLA:
@@ -188,6 +194,10 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
   return false;
 }
 
+// base mask is used to specify registers which may never be cleared
+// set DDC not to be cleared by default
+static const uint32_t CapBaseMask = 0xfffffffe;
+
 bool RISCVExpandPseudo::expandPseudoCClear(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
     MachineBasicBlock::iterator &NextMBBI
@@ -200,23 +210,21 @@ bool RISCVExpandPseudo::expandPseudoCClear(
   const uint32_t *RegMask = MI.getOperand(0).getRegMask();
   // The register mask is indexed by the RISCV register enum, which causes the
   // capability register mask to be
-  // base mask is used to specify registers which may never be cleared
-  // set DDC not to be cleared by default
-  const uint32_t CapBaseMask = 0xfffffffe;
 //  const uint32_t FloatBaseMask = 0xffffffff;
-  uint32_t CapClearMask = 0;
+  uint32_t CapPreserveMask = 0;
 //  uint32_t FloatClearMask = 0;
-  static_assert(sizeof(CapClearMask) == sizeof(*RegMask), "");
-  const uint32_t MaskWidth = sizeof(CapClearMask) * 8;
+  static_assert(sizeof(CapPreserveMask) == sizeof(*RegMask), "");
+  const uint32_t MaskWidth = sizeof(CapPreserveMask) * 8;
 
   const auto C0WordIdx = RISCV::C0 / MaskWidth;
   const auto C0WordOff = RISCV::C0 % MaskWidth;
-  CapClearMask = CapClearMask | (CapBaseMask &
-    // set bits from lower register mask word
-    (RegMask[C0WordIdx] >> C0WordOff));
-  CapClearMask = CapClearMask | (CapBaseMask &
-    // set bits from higher register mask word
-    (RegMask[C0WordIdx+1] << (MaskWidth - C0WordOff)));
+  CapPreserveMask = // set bits from lower register mask word
+      CapPreserveMask | (RegMask[C0WordIdx] >> C0WordOff);
+  CapPreserveMask = // set bits from higher register mask word
+      CapPreserveMask | (RegMask[C0WordIdx+1] << (MaskWidth - C0WordOff));
+
+  // negate preserve mask,
+  uint32_t CapClearMask = CapBaseMask & ~CapPreserveMask;
 
   for (int I = 0; I < 4; I++){
     uint8_t CapMaskSegment = (CapClearMask >> (I * 8));
@@ -338,9 +346,13 @@ bool RISCVExpandPseudo::expandAuipccInstPair(
   NewMBB->setLabelMustBeEmitted();
 
   MF->insert(++MBB.getIterator(), NewMBB);
-
-  BuildMI(NewMBB, DL, TII->get(RISCV::AUIPCC), TmpReg)
-      .addDisp(Symbol, 0, FlagsHi);
+  if (Symbol.getType() == llvm::MachineOperand::MO_MCSymbol) {
+    BuildMI(NewMBB, DL, TII->get(RISCV::AUIPCC), TmpReg)
+        .addSym(Symbol.getMCSymbol(), FlagsHi);
+  } else {
+    BuildMI(NewMBB, DL, TII->get(RISCV::AUIPCC), TmpReg)
+        .addDisp(Symbol, 0, FlagsHi);
+  }
   BuildMI(NewMBB, DL, TII->get(SecondOpcode), DestReg)
       .addReg(TmpReg)
       .addMBB(NewMBB, RISCVII::MO_PCREL_LO);
@@ -549,6 +561,27 @@ bool RISCVExpandPseudo::expandVRELOAD(MachineBasicBlock &MBB,
           .addReg(VL);
   }
   MBBI->eraseFromParent();
+  return true;
+}
+
+bool RISCVExpandPseudo::expandPseudoUCCALL(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+    MachineBasicBlock::iterator &NextMBBI) {
+  MachineInstr &MI = *MBBI;
+  MachineFunction *MF = MBB.getParent();
+  DebugLoc DL = MI.getDebugLoc();
+
+  // seal and install activation record as return address
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSealEntry))
+      .addReg(RISCV::C1)
+      .addReg(RISCV::C1);
+  // jump to
+  MachineInstr *JumpInst = BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCJump))
+      .addReg(RISCV::C6); // same temporary register as used for CTail
+  JumpInst->addOperand(MI.getOperand(0));
+  JumpInst->setPostInstrSymbol(*MF, MI.getOperand(1).getMCSymbol());
+  // remove expanded pseudo-instruction
+  MI.eraseFromParent();
   return true;
 }
 

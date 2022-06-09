@@ -28,6 +28,9 @@ def riscv_cap_call        : SDNode<"RISCVISD::CAP_CALL", SDT_RISCVCapCall,
 def riscv_cap_tail        : SDNode<"RISCVISD::CAP_TAIL", SDT_RISCVCapCall,
                                    [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue,
                                     SDNPVariadic]>;
+def riscv_uninit_call     : SDNode<"RISCVISD::UNINIT_CALL", SDT_RISCVCapCall,
+                                   [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue,
+                                    SDNPVariadic]>;
 def riscv_cap_tag_get     : SDNode<"RISCVISD::CAP_TAG_GET",
                                    SDT_RISCVCheriBoolUnary>;
 def riscv_cap_sealed_get  : SDNode<"RISCVISD::CAP_SEALED_GET",
@@ -1833,6 +1836,16 @@ let Predicates = [HasCheri, IsCapMode, IsPureCapABI],
 def PseudoCCALLIndirect : Pseudo<(outs), (ins GPCR:$rs1),
                                  [(riscv_cap_call GPCR:$rs1)]>,
                           PseudoInstExpansion<(CJALR C1, GPCR:$rs1, 0)>;
+
+let Predicates = [HasCheri, IsCapMode, IsPureCapABI] in {
+let isCall = 1, Uses = [C1] in
+def PseudoUCCALL : Pseudo<(outs), (ins cap_call_symbol:$func, bare_symbol:$ra), []>;
+def : Pat<(riscv_uninit_call tglobaladdr:$func, XLenVT:$ra),
+          (PseudoUCCALL tglobaladdr:$func, bare_symbol:$ra)>;
+def : Pat<(riscv_uninit_call texternalsym:$func, XLenVT:$ra),
+          (PseudoUCCALL texternalsym:$func, bare_symbol:$ra)>;
+} // Predicates = [HasCheri, IsCapMode, IsPureCapABI]
+
 
 let Predicates = [HasCheri, IsCapMode, IsPureCapABI],
     isBarrier = 1, isReturn = 1, isTerminator = 1 in

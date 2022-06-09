@@ -147,6 +147,8 @@ bool llvm::lowerRISCVMachineOperandToMCOperand(const MachineOperand &MO,
   case MachineOperand::MO_JumpTableIndex:
     MCOp = lowerSymbolOperand(MO, AP.GetJTISymbol(MO.getIndex()), AP);
     break;
+  case MachineOperand::MO_MCSymbol:
+    MCOp = lowerSymbolOperand(MO, MO.getMCSymbol(), AP);
   }
   return true;
 }
