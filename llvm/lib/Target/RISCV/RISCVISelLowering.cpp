@@ -11437,7 +11437,7 @@ static bool CC_RISCV_GHC(unsigned ValNo, MVT ValVT, MVT LocVT,
   return true;
 }
 
-static uint32_t *getCallClearMask(
+static uint32_t *getClearMask(
     const SmallVectorImpl<CCValAssign> &ArgLocs) {
   uint32_t *TempMask = new uint32_t[(RISCV::NUM_TARGET_REGS / 32) + 1];
   const auto MaskWidth = sizeof(uint32_t) * 8;
@@ -12041,7 +12041,7 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   // Emit register clearing node
   if (CallConv == CallingConv::CHERI_Uninit) {
     SmallVector<SDValue, 8> Ops;
-    const uint32_t *ClearMask = getCallClearMask(ArgLocs);
+    const uint32_t *ClearMask = getClearMask(ArgLocs);
     Ops.push_back(Chain);
     Ops.push_back(DAG.getRegisterMask(ClearMask));
     if (Glue.getNode()) Ops.push_back(Glue);
@@ -12243,6 +12243,19 @@ RISCVTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
       RetOps.push_back(DAG.getRegister(VA.getLocReg(), VA.getLocVT()));
     }
   }
+
+#ifdef CHERI_UNINIT_CCLEAR
+  if(CallConv == CallingConv::CHERI_Uninit) {
+    SmallVector<SDValue, 3> CROps;
+    const uint32_t *ClearMask = getClearMask(RVLocs);
+    CROps.push_back(Chain);
+    CROps.push_back(DAG.getRegisterMask(ClearMask));
+    if (Glue.getNode()) CROps.push_back(Glue);
+    SDVTList CRNodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
+    Chain = DAG.getNode(RISCVISD::CLEAR_REGS, DL, CRNodeTys, CROps);
+    Glue = Chain.getValue(1);
+  }
+#endif
 
   RetOps[0] = Chain; // Update chain.
 
