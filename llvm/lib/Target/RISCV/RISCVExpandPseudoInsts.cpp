@@ -570,7 +570,6 @@ bool RISCVExpandPseudo::expandPseudoUCCALL(
   MachineInstr &MI = *MBBI;
   MachineFunction *MF = MBB.getParent();
   DebugLoc DL = MI.getDebugLoc();
-
   // seal and install activation record as return address
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSealEntry))
       .addReg(RISCV::C1)

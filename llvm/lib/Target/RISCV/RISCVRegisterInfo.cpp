@@ -75,6 +75,7 @@ RISCVRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     return CSR_ILP32_LP64_SaveList;
   case RISCVABI::ABI_IL32PC64:
   case RISCVABI::ABI_L64PC128:
+  case RISCVABI::ABI_L64PCU128:
     return CSR_IL32PC64_L64PC128_SaveList;
   case RISCVABI::ABI_ILP32F:
   case RISCVABI::ABI_LP64F:
@@ -357,6 +358,7 @@ RISCVRegisterInfo::getCallPreservedMask(const MachineFunction & MF,
     return CSR_ILP32_LP64_RegMask;
   case RISCVABI::ABI_IL32PC64:
   case RISCVABI::ABI_L64PC128:
+  case RISCVABI::ABI_L64PCU128:
     return CSR_IL32PC64_L64PC128_RegMask;
   case RISCVABI::ABI_ILP32F:
   case RISCVABI::ABI_LP64F:

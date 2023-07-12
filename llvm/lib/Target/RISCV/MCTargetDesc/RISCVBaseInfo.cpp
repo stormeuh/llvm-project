@@ -99,6 +99,7 @@ ABI getTargetABI(StringRef ABIName) {
                        .Case("l64pc128", ABI_L64PC128)
                        .Case("l64pc128f", ABI_L64PC128F)
                        .Case("l64pc128d", ABI_L64PC128D)
+                       .Case("l64pcu128", ABI_L64PCU128)
                        .Default(ABI_Unknown);
   return TargetABI;
 }

@@ -88,6 +88,14 @@ private:
                          int64_t Amount, MachineInstr::MIFlag Flag) const;
   std::pair<int64_t, Align>
   assignRVVStackObjectOffsets(MachineFunction &MF) const;
+  void adjustRegDownForUninit(MachineBasicBlock &MBB,
+                            MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
+                            Register DestReg, Register SrcReg, int64_t Amount, 
+                            MachineInstr::MIFlag Flag) const;
+  void adjustRegUpForUninit(MachineBasicBlock &MBB,
+                            MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
+                            Register DestReg, Register SrcReg, int64_t Amount, 
+                            MachineInstr::MIFlag Flag) const;
 };
 } // namespace llvm
 #endif

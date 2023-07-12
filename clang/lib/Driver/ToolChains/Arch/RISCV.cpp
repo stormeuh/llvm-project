@@ -57,6 +57,7 @@ static bool isCheriPurecapABIName(StringRef ABI) {
       .Case("l64pc128", true)
       .Case("l64pc128f", true)
       .Case("l64pc128d", true)
+      .Case("l64pcu128", true)
       .Default(false);
 }
 
