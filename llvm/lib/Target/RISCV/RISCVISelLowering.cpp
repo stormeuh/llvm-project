@@ -57,6 +57,19 @@ static cl::opt<bool>
                                            "pure-capability function calls"),
                                   cl::init(false), cl::Hidden);
 
+enum CHERIUninitEncapOpts {
+  none, trampoline
+};
+
+static cl::opt<CHERIUninitEncapOpts>
+    CHERIUninitReturnEncap("cheri-uninit-return-encapsulation",
+                           cl::desc("Select which return encapsulation mechanism"
+                           "to use when calling with the uninit CC"),
+                           cl::values(
+                            clEnumVal(none, "No encapsulation"),
+                            clEnumVal(trampoline, "Trampoline")
+                           ));
+
 RISCVTargetLowering::RISCVTargetLowering(const TargetMachine &TM,
                                          const RISCVSubtarget &STI)
     : TargetLowering(TM), Subtarget(STI) {
@@ -11843,14 +11856,15 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   if (!IsTailCall)
     Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, CLI.DL);
 
-#ifdef CHERI_UNINIT_ACTREC
+
   std::tuple<SDValue, SDValue, SDValue> ActrecNodes;
-  // Emit activation record onto the stack
-  if (CallConv == CallingConv::CHERI_Uninit) {
-    ActrecNodes = emitActivationRecord(Chain, DL, DAG, MF, PtrVT, XLenVT);
-    Chain = std::get<0>(ActrecNodes);
+  if(CHERIUninitReturnEncap == trampoline) {
+    // Emit activation record onto the stack
+    if (CallConv == CallingConv::CHERI_Uninit) {
+      ActrecNodes = emitActivationRecord(Chain, DL, DAG, MF, PtrVT, XLenVT);
+      Chain = std::get<0>(ActrecNodes);
+    }
   }
-#endif
 
   // Copy argument values to their designated locations.
   SmallVector<std::pair<Register, SDValue>, 8> RegsToPass;
@@ -12039,6 +12053,13 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
       Callee = DAG.getTargetExternalFunctionSymbol(S->getSymbol(), OpFlags);
   }
 
+  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitReturnEncap == trampoline) {
+    // install activation record code as return address
+    SDValue ActrecPtr = std::get<1>(ActrecNodes);
+    Chain = DAG.getCopyToReg(Chain, DL, RISCV::C1, ActrecPtr, Glue);
+    Glue = Chain.getValue(1);
+  }
+
 #ifdef CHERI_UNINIT_CCLEAR
   // Emit register clearing node
   if (CallConv == CallingConv::CHERI_Uninit) {
@@ -12053,26 +12074,15 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   }
 #endif
 
-#ifdef CHERI_UNINIT_ACTREC
-  if (CallConv == CallingConv::CHERI_Uninit) {
-    // install activation record code as return address
-    SDValue ActrecPtr = std::get<1>(ActrecNodes);
-    Chain = DAG.getCopyToReg(Chain, DL, RISCV::C1, ActrecPtr, Glue);
-    Glue = Chain.getValue(1);
-  }
-#endif
-
   // The first call operand is the chain and the second is the target address.
   SmallVector<SDValue, 8> Ops;
   Ops.push_back(Chain);
   Ops.push_back(Callee);
 
-#ifdef CHERI_UNINIT_ACTREC
   // Add return symbol to the arguments
-  if (CallConv == CallingConv::CHERI_Uninit) {
+  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitReturnEncap == trampoline) {
     Ops.push_back(std::get<2>(ActrecNodes));
   }
-#endif
 
   // Add argument registers to the end of the list so that they are
   // known live into the call.
@@ -12103,11 +12113,9 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   }
 
   if (RISCVABI::isCheriPureCapABI(Subtarget.getTargetABI())) {
-#ifdef CHERI_UNINIT_ACTREC
-    if (CallConv == CallingConv::CHERI_Uninit) {
-      Chain = DAG.getNode(RISCVISD::UNINIT_CALL, DL, NodeTys, Ops);
+    if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitReturnEncap == trampoline) {
+        Chain = DAG.getNode(RISCVISD::UNINIT_CALL, DL, NodeTys, Ops);
     } else
-#endif
       Chain = DAG.getNode(RISCVISD::CAP_CALL, DL, NodeTys, Ops);
   } else
     Chain = DAG.getNode(RISCVISD::CALL, DL, NodeTys, Ops);
