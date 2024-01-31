@@ -11532,6 +11532,12 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(SDValue Chain, SDLoc &D
   SDValue RAAddrSym = DAG.getMCSymbol(RLabel, XLenVT);
   SDValue RAAddr = SDValue(DAG.getMachineNode(RISCV::PseudoCLLC, DL, PtrVT, RAAddrSym), 0);
   OutChain = DAG.getStore(OutChain, DL, RAAddr, NextPtr, MachinePointerInfo(), PtrVTAlign);
+  SDValue Ops[] = {
+      DAG.getTargetConstant(Intrinsic::cheri_bounded_stack_cap, DL, XLenVT)
+    , ActrecPtr
+    , DAG.getConstant(ActrecSize, DL, XLenVT)
+    };
+  ActrecPtr = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, DL, PtrVT, Ops);
   return std::make_tuple(OutChain, ActrecPtr, RAAddrSym);
 }
 
