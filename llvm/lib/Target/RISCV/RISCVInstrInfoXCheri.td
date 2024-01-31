@@ -386,7 +386,7 @@ let Predicates = [HasCheri, IsRV64] in {
 def CUninit     : Cheri_r<0x1a, "cuninit", GPCR>;
 def CDropUninit : Cheri_r<0x1b, "cdropuninit", GPCR>;
 def CShrink     : Cheri_rr<0x22, "cshrink">;
-def CShrinkImm  : Cheri_ri<0x3, "cshrinkimm", 0>;
+def CShrinkImm  : Cheri_ri<0x3, "cshrink", 0>;
 }
 
 def : InstAlias<"cincoffsetimm $cd, $cs1, $imm",
