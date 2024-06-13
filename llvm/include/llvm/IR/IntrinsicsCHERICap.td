@@ -180,3 +180,6 @@ def int_cheri_bounded_stack_cap :
   Intrinsic<[llvm_cap_ty], [llvm_cap_ty, llvm_anyint_ty], [IntrNoMem, IntrWillReturn]>;
 def int_cheri_bounded_stack_cap_dynamic :
   Intrinsic<[llvm_cap_ty], [llvm_cap_ty, llvm_anyint_ty], [IntrNoMem, IntrWillReturn]>;
+
+def int_cheri_shrink_cap :
+  Intrinsic<[llvm_cap_ty], [llvm_cap_ty, llvm_anyint_ty], [IntrNoMem, IntrWillReturn]>;

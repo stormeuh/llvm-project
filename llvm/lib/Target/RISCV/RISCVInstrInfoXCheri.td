@@ -348,6 +348,10 @@ def CGetUninit : Cheri_r<0x19, "cgetuninit">;
 // Capability-Modification Instructions
 //===----------------------------------------------------------------------===//
 
+def SDT_RISCVCheriVoidUnary : SDTypeProfile<0, 1, [SDTCisInt<0>]>;
+def riscv_cap_shrink_stack : SDNode<"RISCVISD::CAP_SHRINK_STACK", SDT_RISCVCheriVoidUnary,
+                                    [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue]>;
+
 let Predicates = [HasCheri] in {
 let Constraints = "@traps_if_sealed $rs1" in {
 let mayTrap = 1 in {
@@ -387,6 +391,10 @@ def CUninit     : Cheri_r<0x1a, "cuninit", GPCR>;
 def CDropUninit : Cheri_r<0x1b, "cdropuninit", GPCR>;
 def CShrink     : Cheri_rr<0x22, "cshrink">;
 def CShrinkImm  : Cheri_ri<0x3, "cshrink", 0>;
+
+let hasSideEffects = 1, mayLoad = 0, mayStore = 0, hasCtrlDep = 1, Uses = [C2], Defs = [C2] in
+def PseudoCShrinkStack : Pseudo<(outs), (ins uimm12:$imm), [(riscv_cap_shrink_stack uimm12:$imm)]>,
+                         PseudoInstExpansion<(CShrinkImm C2, C2, uimm12:$imm)>;
 }
 
 def : InstAlias<"cincoffsetimm $cd, $cs1, $imm",
@@ -1262,6 +1270,9 @@ def : PatGpcrGpr<int_cheri_bounded_stack_cap, CSetBounds>;
 def : PatGpcrUimm12<int_cheri_bounded_stack_cap, CSetBoundsImm>;
 def : PatGpcrGpr<int_cheri_bounded_stack_cap_dynamic, CSetBounds>;
 def : PatGpcrUimm12<int_cheri_bounded_stack_cap_dynamic, CSetBoundsImm>;
+
+def : PatGpcrGpr<int_cheri_shrink_cap, CShrink>;
+def : PatGpcrUimm12<int_cheri_shrink_cap, CShrinkImm>;
 
 def : Pat<(CapFrameAddrRegImm GPCR:$rs1, simm12:$imm12),
           (CIncOffsetImm GPCR:$rs1, simm12:$imm12)>;

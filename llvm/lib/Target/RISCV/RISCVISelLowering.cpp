@@ -47,7 +47,7 @@ using namespace llvm;
 #define DEBUG_TYPE "riscv-lower"
 
 #define CHERI_UNINIT_CCLEAR
-#define CHERI_UNINIT_ACTREC
+#define CHERI_UNINIT_SHRINK
 
 STATISTIC(NumTailCalls, "Number of tail calls");
 
@@ -11532,12 +11532,12 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(SDValue Chain, SDLoc &D
   SDValue RAAddrSym = DAG.getMCSymbol(RLabel, XLenVT);
   SDValue RAAddr = SDValue(DAG.getMachineNode(RISCV::PseudoCLLC, DL, PtrVT, RAAddrSym), 0);
   OutChain = DAG.getStore(OutChain, DL, RAAddr, NextPtr, MachinePointerInfo(), PtrVTAlign);
-  SDValue Ops[] = {
+  // Place bounds on the activation record capability
+  ActrecPtr = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, DL, PtrVT, {
       DAG.getTargetConstant(Intrinsic::cheri_bounded_stack_cap, DL, XLenVT)
     , ActrecPtr
     , DAG.getConstant(ActrecSize, DL, XLenVT)
-    };
-  ActrecPtr = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, DL, PtrVT, Ops);
+    });
   return std::make_tuple(OutChain, ActrecPtr, RAAddrSym);
 }
 
@@ -12066,6 +12066,18 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     Glue = Chain.getValue(1);
   }
 
+#ifdef CHERI_UNINIT_SHRINK
+  // Emit stack cap shrinking node
+  if (CallConv == CallingConv::CHERI_Uninit) {
+    Chain = DAG.getNode(RISCVISD::CAP_SHRINK_STACK, DL, {MVT::Other, MVT::Glue}, {
+      Chain
+    , DAG.getConstant(0, DL, XLenVT)
+    , Glue
+    });
+    Glue = Chain.getValue(1);
+  }
+#endif
+
 #ifdef CHERI_UNINIT_CCLEAR
   // Emit register clearing node
   if (CallConv == CallingConv::CHERI_Uninit) {
@@ -12494,6 +12506,7 @@ const char *RISCVTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(WRITE_CSR)
   NODE_NAME_CASE(SWAP_CSR)
   NODE_NAME_CASE(CLEAR_REGS)
+  NODE_NAME_CASE(CAP_SHRINK_STACK)
   NODE_NAME_CASE(UNINIT_CALL)
   }
   // clang-format on
