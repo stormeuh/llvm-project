@@ -93,6 +93,10 @@ def int_cheri_cap_unseal  :
    ClangBuiltin<"__builtin_cheri_seal_entry">,
    Intrinsic<[llvm_cap_ty], [llvm_cap_ty],
     [IntrNoMem, IntrWillReturn]>;
+// TODO: add builtin to clang for this intrinsic
+def int_cheri_cap_seal_indirect_pcc:
+  Intrinsic<[llvm_cap_ty], [llvm_cap_ty],
+    [IntrNoMem, IntrWillReturn]>;
 
 def int_cheri_cap_perms_check :
   Intrinsic<[], [llvm_cap_ty, llvm_anyint_ty],

@@ -382,8 +382,10 @@ def CBuildCap       : Cheri_rr<0x1d, "cbuildcap", GPCR, GPCR, GPCRC0IsDDC>;
 def CCopyType       : Cheri_rr<0x1e, "ccopytype", GPCR, GPCR>;
 let defsCanBeSealed = 1 in
 def CCSeal          : Cheri_rr<0x1f, "ccseal", GPCR, GPCR>;
-let defsCanBeSealed = 1 in
+let defsCanBeSealed = 1 in {
 def CSealEntry      : Cheri_r<0x11, "csealentry", GPCR>;
+def CSealL          : Cheri_r<0x19, "cseall", GPCR>;
+}
 } // let mayTrap = 1
 
 let Predicates = [HasCheri, IsRV64] in {
@@ -438,6 +440,9 @@ let isCall = 1, hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
 def CInvoke : RVInstCheriTwoSrc<0x7e, 0x1, 0, OPC_CHERI, (outs),
                                 (ins GPCR:$rs1, GPCR:$rs2),
                                 "cinvoke", "$rs1, $rs2">;
+
+let isCall = 1, hasSideEffects = 0, mayLoad = 1, mayStore = 0 in
+def CInvokeLAL : Cheri_r<0x1a, "cinvokelal", GPCR>;
 
 def : InstAlias<"jalr.cap $cs1", (JALR_CAP C1, GPCR:$cs1), 1>;
 def : InstAlias<"jr.cap $cs1",   (JALR_CAP C0, GPCR:$cs1), 1>;
@@ -1264,6 +1269,7 @@ def : PatGpcrGpcr<int_cheri_cap_build, CBuildCap>;
 def : PatGpcrGpcr<int_cheri_cap_type_copy, CCopyType>;
 def : PatGpcrGpcr<int_cheri_cap_conditional_seal, CCSeal>;
 def : PatGpcr<int_cheri_cap_seal_entry, CSealEntry>;
+def : PatGpcr<int_cheri_cap_seal_indirect_pcc, CSealEntry>;
 
 // TODO: Make this rematerialisable like MIPS
 def : PatGpcrGpr<int_cheri_bounded_stack_cap, CSetBounds>;

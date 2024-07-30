@@ -168,7 +168,7 @@ let RegAltNameIndices = [ABIRegAltName] in {
   def C28 : RISCVCapReg<X28,"c28", ["ct3"]>, DwarfRegNum<[28]>;
   def C29 : RISCVCapReg<X29,"c29", ["ct4"]>, DwarfRegNum<[29]>;
   def C30 : RISCVCapReg<X30,"c30", ["ct5"]>, DwarfRegNum<[30]>;
-  def C31 : RISCVCapReg<X31,"c31", ["ct6"]>, DwarfRegNum<[31]>;
+  def C31 : RISCVCapReg<X31,"c31", ["ct6", "idc"]>, DwarfRegNum<[31]>;
   }
 
   // This is the encoding of DDC when C0 means DDC, and not the encoding of DDC
