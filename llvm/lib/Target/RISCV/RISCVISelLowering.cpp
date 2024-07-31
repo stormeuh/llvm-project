@@ -22,6 +22,7 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/MemoryLocation.h"
+#include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -41,6 +42,7 @@
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include "CHERIUninitTrampoline.h"
 
 using namespace llvm;
 
@@ -58,7 +60,7 @@ static cl::opt<bool>
                                   cl::init(false), cl::Hidden);
 
 enum CHERIUninitEncapOpts {
-  none, trampoline
+  none, trampoline, isentry
 };
 
 static cl::opt<CHERIUninitEncapOpts>
@@ -67,7 +69,8 @@ static cl::opt<CHERIUninitEncapOpts>
                            "to use when calling with the uninit CC"),
                            cl::values(
                             clEnumVal(none, "No encapsulation"),
-                            clEnumVal(trampoline, "Trampoline")
+                            clEnumVal(trampoline, "Trampoline"),
+                            clEnumVal(isentry, "Indirect sentry")
                            ));
 
 RISCVTargetLowering::RISCVTargetLowering(const TargetMachine &TM,
@@ -11481,50 +11484,61 @@ static uint32_t *getClearMask(
   return TempMask;
 }
 
-static SmallVector<uint64_t, 3> ActrecCode = {
-  0x0302a08f020002db,
-  0x0182a3030202a10f,
-  0x000080672261045b
-};
+// below was moved to CHERIUninitTrampoline.h so it can be automatically generated
+// static SmallVector<uint64_t, 3> ActrecCode = {
+//   0x0302a08f020002db,
+//   0x0182a3030202a10f,
+//   0x000080672261045b
+// };
 
 static unsigned ActrecCodeSize = 8 * ActrecCode.size();
 
-SDValue emitActivationRecordCode(SDValue Chain, SDLoc &DL, SelectionDAG &DAG, SDValue ActrecPtr) {
+SDValue emitActivationRecordCode(SDValue Chain, SDLoc &DL, SelectionDAG &DAG, 
+                                 SDValue ActrecPtr) {
+
   MVT DWVT = MVT::getIntegerVT(64);
   SDValue OutChain = Chain;
   SDValue NextPtr = ActrecPtr;
-  for(auto ActrecElem = ActrecCode.begin(); ActrecElem != ActrecCode.end(); ++ActrecElem){
+
+  for(auto *ActrecElem = ActrecCode.begin(); 
+      ActrecElem != ActrecCode.end(); ++ActrecElem){
+
     SDValue ActrecConst = DAG.getConstant(*ActrecElem, DL, DWVT);
     OutChain = DAG.getStore(OutChain, DL, ActrecConst, NextPtr, MachinePointerInfo());
     if (ActrecElem + 1 != ActrecCode.end())
       NextPtr = DAG.getPointerAdd(DL, NextPtr, 8);
   }
+
   return OutChain;
 }
 
-std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(SDValue Chain, SDLoc &DL, SelectionDAG &DAG, MachineFunction &MF, EVT PtrVT, EVT XLenVT) {
+std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
+    SDValue Chain, SDLoc &DL, SelectionDAG &DAG, MachineFunction &MF, 
+    EVT PtrVT, EVT XLenVT) 
+    {
+
   // factor sizing information out of code below
   unsigned XLenVTSize = XLenVT.getFixedSizeInBits()/8;
   unsigned PtrVTSize = PtrVT.getFixedSizeInBits()/8;
-  unsigned ActrecSize = ActrecCodeSize + XLenVTSize + PtrVTSize * 2;
+  
+  assert(CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry);
+  unsigned ActrecSize = CHERIUninitReturnEncap == trampoline 
+                      ? (ActrecCodeSize + XLenVTSize + PtrVTSize * 2)
+                      : (PtrVTSize * 3); // assume isentry in other case
+  unsigned ActrecOffset = CHERIUninitReturnEncap == trampoline
+                        ? (ActrecSize - ActrecCodeSize)
+                        : 0;
+
   // create stack object and obtain pointer to it
   Align PtrVTAlign = MF.getSubtarget<RISCVSubtarget>().getRegisterInfo()->getSpillAlign(RISCV::GPCRRegClass);
   int FI = MF.getFrameInfo().CreateStackObject(ActrecSize, PtrVTAlign, /*isSS*/ false);
-  // emit code portion of activation record and advance pointer
   SDValue ActrecPtr = DAG.getFrameIndex(FI, PtrVT);
-  SDValue OutChain = emitActivationRecordCode(Chain, DL, DAG, ActrecPtr);
-  // emit frame pointer offset calculation, store and advance pointer
-  SDValue NextPtr = DAG.getPointerAdd(DL, ActrecPtr, ActrecCodeSize);
-  SDValue FPOffset = DAG.getNode(ISD::SUB, DL, XLenVT,
-                                 DAG.getRegister(RISCV::X8, XLenVT),
-                                 DAG.getRegister(RISCV::X2, XLenVT));
-  OutChain = DAG.getStore(OutChain, DL, FPOffset, NextPtr, MachinePointerInfo());
-  // emit stack capability store and advance pointer
-  NextPtr = DAG.getPointerAdd(DL, NextPtr, XLenVTSize);
-  SDValue CSPReg = DAG.getRegister(RISCV::C2, PtrVT);
-  OutChain = DAG.getStore(OutChain, DL, CSPReg, NextPtr, MachinePointerInfo(200));
+
+  SDValue OutChain = Chain;
+  SDValue NextPtr = ActrecPtr;
+
+  // emit return address
   // create placeholder for return address, to be filled in later when node actually exists
-  NextPtr = DAG.getPointerAdd(DL, NextPtr, PtrVTSize);
   // Get first forward directional label (which should be positioned right after the call)
   MCSymbol *RLabel = MF.getMMI().getContext().createDirectionalLocalSymbol(1);
   // setting this symbol to have xlenvt is stupid, but it is what the tablegen backend expects
@@ -11532,12 +11546,37 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(SDValue Chain, SDLoc &D
   SDValue RAAddrSym = DAG.getMCSymbol(RLabel, XLenVT);
   SDValue RAAddr = SDValue(DAG.getMachineNode(RISCV::PseudoCLLC, DL, PtrVT, RAAddrSym), 0);
   OutChain = DAG.getStore(OutChain, DL, RAAddr, NextPtr, MachinePointerInfo(), PtrVTAlign);
+  NextPtr = DAG.getPointerAdd(DL, NextPtr, PtrVTSize); // advance pointer
+
+  // emit stack capability store
+  SDValue CSPReg = DAG.getRegister(RISCV::C2, PtrVT);
+  OutChain = DAG.getStore(OutChain, DL, CSPReg, NextPtr, MachinePointerInfo(200));
+  NextPtr = DAG.getPointerAdd(DL, NextPtr, PtrVTSize); // advance pointer
+
+  if (CHERIUninitReturnEncap == trampoline){ // trampoline specific stuff
+    // emit frame pointer offset calculation, store and advance pointer
+    SDValue FPOffset = DAG.getNode(ISD::SUB, DL, XLenVT,
+                                  DAG.getRegister(RISCV::X8, XLenVT),
+                                  DAG.getRegister(RISCV::X2, XLenVT));
+    OutChain = DAG.getStore(OutChain, DL, FPOffset, NextPtr, MachinePointerInfo());
+    NextPtr = DAG.getPointerAdd(DL, NextPtr, XLenVTSize); // advance pointer
+
+    // emit code portion of activation record and advance pointer
+    OutChain = emitActivationRecordCode(OutChain, DL, DAG, NextPtr);    
+  } else { // isentry specific stuff
+    // store full CFP instead of offset like trampoline
+    SDValue CFPReg = DAG.getRegister(RISCV::C8, PtrVT);
+    OutChain = DAG.getStore(OutChain, DL, CFPReg, NextPtr, MachinePointerInfo(200));
+  }
+
   // Place bounds on the activation record capability
   ActrecPtr = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, DL, PtrVT, {
       DAG.getTargetConstant(Intrinsic::cheri_bounded_stack_cap, DL, XLenVT)
     , ActrecPtr
     , DAG.getConstant(ActrecSize, DL, XLenVT)
     });
+  // offset if necessary
+  if (ActrecOffset) ActrecPtr = DAG.getPointerAdd(DL, ActrecPtr, ActrecOffset);
   return std::make_tuple(OutChain, ActrecPtr, RAAddrSym);
 }
 
@@ -11864,7 +11903,7 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
 
   std::tuple<SDValue, SDValue, SDValue> ActrecNodes;
-  if(CHERIUninitReturnEncap == trampoline) {
+  if(CHERIUninitReturnEncap != none) {
     // Emit activation record onto the stack
     if (CallConv == CallingConv::CHERI_Uninit) {
       ActrecNodes = emitActivationRecord(Chain, DL, DAG, MF, PtrVT, XLenVT);
