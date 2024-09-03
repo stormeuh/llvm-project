@@ -341,7 +341,7 @@ def PseudoCGetAddr : Pseudo<(outs GPR:$rd), (ins GPCR:$cs1), [],
 }
 
 let Predicates = [HasCheri,IsRV64] in {
-def CGetUninit : Cheri_r<0x19, "cgetuninit">;
+def CGetUninit : Cheri_r<0x1b, "cgetuninit">;
 }
 
 //===----------------------------------------------------------------------===//
@@ -389,8 +389,8 @@ def CSealL          : Cheri_r<0x19, "cseall", GPCR>;
 } // let mayTrap = 1
 
 let Predicates = [HasCheri, IsRV64] in {
-def CUninit     : Cheri_r<0x1a, "cuninit", GPCR>;
-def CDropUninit : Cheri_r<0x1b, "cdropuninit", GPCR>;
+def CUninit     : Cheri_r<0x1c, "cuninit", GPCR>;
+def CDropUninit : Cheri_r<0x1d, "cdropuninit", GPCR>;
 def CShrink     : Cheri_rr<0x22, "cshrink">;
 def CShrinkImm  : Cheri_ri<0x3, "cshrink", 0>;
 
@@ -403,6 +403,8 @@ def : InstAlias<"cincoffsetimm $cd, $cs1, $imm",
                 (CIncOffsetImm GPCR:$cd, GPCR:$cs1, simm12:$imm), 0>;
 def : InstAlias<"csetboundsimm $cd, $cs1, $imm",
                 (CSetBoundsImm GPCR:$cd, GPCR:$cs1, uimm12:$imm), 0>;
+def : InstAlias<"cshrinkimm $cd, $cs1, $imm",
+                (CShrinkImm GPCR:$cd, GPCR:$cs1, uimm12:$imm), 0>;
 }
 
 //===----------------------------------------------------------------------===//
