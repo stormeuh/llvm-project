@@ -27,13 +27,16 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
+#include "llvm/CodeGen/MachineMemOperand.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
 #include "llvm/CodeGen/ValueTypes.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsRISCV.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/MC/MCContext.h"
@@ -11563,7 +11566,7 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
 
     // emit code portion of activation record and advance pointer
     OutChain = emitActivationRecordCode(OutChain, DL, DAG, NextPtr);    
-  } else { // isentry specific stuff
+  } else if (CHERIUninitReturnEncap == isentry) { // isentry specific stuff
     // store full CFP instead of offset like trampoline
     SDValue CFPReg = DAG.getRegister(RISCV::C8, PtrVT);
     OutChain = DAG.getStore(OutChain, DL, CFPReg, NextPtr, MachinePointerInfo(200));
@@ -11577,6 +11580,14 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
     });
   // offset if necessary
   if (ActrecOffset) ActrecPtr = DAG.getPointerAdd(DL, ActrecPtr, ActrecOffset);
+  // seal
+  auto SealingOp = (CHERIUninitReturnEncap == trampoline
+                 ? Intrinsic::cheri_cap_seal_entry
+                 : Intrinsic::cheri_cap_seal_indirect_pcc);
+  ActrecPtr = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, DL, PtrVT, {
+    DAG.getTargetConstant(SealingOp, DL, XLenVT)
+  , ActrecPtr
+  });
   return std::make_tuple(OutChain, ActrecPtr, RAAddrSym);
 }
 
@@ -12098,7 +12109,8 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
       Callee = DAG.getTargetExternalFunctionSymbol(S->getSymbol(), OpFlags);
   }
 
-  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitReturnEncap == trampoline) {
+  if (CallConv == CallingConv::CHERI_Uninit
+  && (CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry)) {
     // install activation record code as return address
     SDValue ActrecPtr = std::get<1>(ActrecNodes);
     Chain = DAG.getCopyToReg(Chain, DL, RISCV::C1, ActrecPtr, Glue);
@@ -12137,7 +12149,8 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   Ops.push_back(Callee);
 
   // Add return symbol to the arguments
-  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitReturnEncap == trampoline) {
+  if (CallConv == CallingConv::CHERI_Uninit
+  && (CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry)) {
     Ops.push_back(std::get<2>(ActrecNodes));
   }
 
@@ -12170,7 +12183,8 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   }
 
   if (RISCVABI::isCheriPureCapABI(Subtarget.getTargetABI())) {
-    if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitReturnEncap == trampoline) {
+    if (CallConv == CallingConv::CHERI_Uninit
+    && (CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry)) {
         Chain = DAG.getNode(RISCVISD::UNINIT_CALL, DL, NodeTys, Ops);
     } else
       Chain = DAG.getNode(RISCVISD::CAP_CALL, DL, NodeTys, Ops);
@@ -12179,6 +12193,27 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
   DAG.addNoMergeSiteInfo(Chain.getNode(), CLI.NoMerge);
   Glue = Chain.getValue(1);
+
+  if (CallConv == CallingConv::CHERI_Uninit &&
+      CHERIUninitReturnEncap == isentry) {
+    // restore stack and frame capabilities from activation record
+    // load activation record pointer and calculate offsets
+    SDValue ActrecCap = DAG.getCopyFromReg(Chain, DL, RISCV::C31, PtrVT, Glue);
+    SDValue StackCapField = DAG.getPointerAdd(DL, ActrecCap, 16);
+    SDValue FrameCapField = DAG.getPointerAdd(DL, ActrecCap, 32);
+
+    // emit loads and moves to put into correct registers
+    // TODO make load put cap immediately into correct register
+    SDValue StackCap = DAG.getLoad(PtrVT, DL, ActrecCap.getValue(1),
+                                   StackCapField, MachinePointerInfo());
+    Chain = DAG.getCopyToReg(StackCap.getValue(1), DL, RISCV::C2, StackCap);
+    SDValue FrameCap =
+        DAG.getLoad(PtrVT, DL, Chain, FrameCapField, MachinePointerInfo());
+    Chain = DAG.getCopyToReg(Chain, DL, RISCV::C8, FrameCap, SDValue());
+
+    // glue to CALLSEQ_END node
+    Glue = Chain.getValue(1);
+  }
 
   // Mark the end of the call, which is glued to the call itself.
   Chain = DAG.getCALLSEQ_END(Chain,
@@ -12332,6 +12367,12 @@ RISCVTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
   }
 
   unsigned RetOpc = RISCVISD::RET_FLAG;
+
+  // returning with an indirect sentry requires CInvokeLAL instead of CRet
+  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitReturnEncap == isentry) {
+    RetOpc = RISCVISD::RET_FLAG_INDIRECT;
+  }
+
   // Interrupt service routines use different return instructions.
   const Function &Func = DAG.getMachineFunction().getFunction();
   if (Func.hasFnAttribute("interrupt")) {
@@ -12547,6 +12588,7 @@ const char *RISCVTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(CLEAR_REGS)
   NODE_NAME_CASE(CAP_SHRINK_STACK)
   NODE_NAME_CASE(UNINIT_CALL)
+  NODE_NAME_CASE(RET_FLAG_INDIRECT)
   }
   // clang-format on
   return nullptr;

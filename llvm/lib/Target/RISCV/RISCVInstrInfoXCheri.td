@@ -31,6 +31,8 @@ def riscv_cap_tail        : SDNode<"RISCVISD::CAP_TAIL", SDT_RISCVCapCall,
 def riscv_uninit_call     : SDNode<"RISCVISD::UNINIT_CALL", SDT_RISCVCapCall,
                                    [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue,
                                     SDNPVariadic]>;
+def riscv_ret_flag_indirect : SDNode<"RISCVISD::RET_FLAG_INDIRECT", SDTNone,
+                                   [SDNPHasChain, SDNPOptInGlue, SDNPVariadic]>;
 def riscv_cap_tag_get     : SDNode<"RISCVISD::CAP_TAG_GET",
                                    SDT_RISCVCheriBoolUnary>;
 def riscv_cap_sealed_get  : SDNode<"RISCVISD::CAP_SEALED_GET",
@@ -1271,7 +1273,7 @@ def : PatGpcrGpcr<int_cheri_cap_build, CBuildCap>;
 def : PatGpcrGpcr<int_cheri_cap_type_copy, CCopyType>;
 def : PatGpcrGpcr<int_cheri_cap_conditional_seal, CCSeal>;
 def : PatGpcr<int_cheri_cap_seal_entry, CSealEntry>;
-def : PatGpcr<int_cheri_cap_seal_indirect_pcc, CSealEntry>;
+def : PatGpcr<int_cheri_cap_seal_indirect_pcc, CSealL>;
 
 // TODO: Make this rematerialisable like MIPS
 def : PatGpcrGpr<int_cheri_bounded_stack_cap, CSetBounds>;
@@ -1870,6 +1872,11 @@ let Predicates = [HasCheri, IsCapMode, IsPureCapABI],
     isBarrier = 1, isReturn = 1, isTerminator = 1 in
 def PseudoCRET : Pseudo<(outs), (ins), [(riscv_ret_flag)]>,
                  PseudoInstExpansion<(CJALR C0, C1, 0)>;
+
+let Predicates = [HasCheri, IsCapMode, IsPureCapABI],
+    isBarrier = 1, isReturn = 1, isTerminator = 1, mayLoad = 1 in
+def PseudoCRETIndirect : Pseudo<(outs), (ins), [(riscv_ret_flag_indirect)]>,
+                         PseudoInstExpansion<(CInvokeLAL C0, C1)>;
 
 let Predicates = [HasCheri, IsCapMode],
     isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1, Uses = [C2],

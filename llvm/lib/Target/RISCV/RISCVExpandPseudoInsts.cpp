@@ -571,9 +571,9 @@ bool RISCVExpandPseudo::expandPseudoUCCALL(
   MachineFunction *MF = MBB.getParent();
   DebugLoc DL = MI.getDebugLoc();
   // seal and install activation record as return address
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSealEntry))
-      .addReg(RISCV::C1)
-      .addReg(RISCV::C1);
+  // BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSealEntry))
+  //     .addReg(RISCV::C1)
+  //     .addReg(RISCV::C1);
   // jump to
   MachineInstr *JumpInst = BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCJump))
       .addReg(RISCV::C6); // same temporary register as used for CTail

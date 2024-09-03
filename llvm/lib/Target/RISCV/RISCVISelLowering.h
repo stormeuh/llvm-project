@@ -347,6 +347,8 @@ enum NodeType : unsigned {
   CLEAR_REGS,
   // Shrink the stack cap
   CAP_SHRINK_STACK,
+  // Return with CInvokeLAL instead of cret
+  RET_FLAG_INDIRECT,
 
   // WARNING: Do not add anything in the end unless you want the node to
   // have memop! In fact, starting from FIRST_TARGET_MEMORY_OPCODE all
