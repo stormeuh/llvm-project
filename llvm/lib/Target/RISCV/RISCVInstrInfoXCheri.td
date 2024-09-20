@@ -1275,9 +1275,20 @@ def : PatGpcrGpcr<int_cheri_cap_conditional_seal, CCSeal>;
 def : PatGpcr<int_cheri_cap_seal_entry, CSealEntry>;
 def : PatGpcr<int_cheri_cap_seal_indirect_pcc, CSealL>;
 
+def IsUninitABI
+    : Predicate<"RISCVABI::isUninitABI(Subtarget->getTargetABI())">;
+def NotUninitABI
+    : Predicate<"!RISCVABI::isUninitABI(Subtarget->getTargetABI())">;
+
 // TODO: Make this rematerialisable like MIPS
+let Predicates = [NotUninitABI] in {
 def : PatGpcrGpr<int_cheri_bounded_stack_cap, CSetBounds>;
 def : PatGpcrUimm12<int_cheri_bounded_stack_cap, CSetBoundsImm>;
+}
+let Predicates = [IsUninitABI] in {
+def : Pat<(int_cheri_bounded_stack_cap GPCR:$rs1, GPR:$rs2), (CDropUninit (CSetBounds GPCR:$rs1, GPR:$rs2))>;
+def : Pat<(int_cheri_bounded_stack_cap GPCR:$rs1, uimm12:$imm12), (CDropUninit (CSetBoundsImm GPCR:$rs1, uimm12:$imm12))>;
+}
 def : PatGpcrGpr<int_cheri_bounded_stack_cap_dynamic, CSetBounds>;
 def : PatGpcrUimm12<int_cheri_bounded_stack_cap_dynamic, CSetBoundsImm>;
 

@@ -414,6 +414,16 @@ inline static bool isCheriPureCapABI(ABI TargetABI) {
     llvm_unreachable("Improperly initialised target ABI");
   }
 }
+
+inline static bool isUninitABI(ABI TargetABI) {
+  switch (TargetABI) {
+    case ABI_L64PCU128:
+      return true;
+    default:
+      return false;
+  }
+}
+
 // Returns the register holding shadow call stack pointer.
 MCRegister getSCSPReg();
 
