@@ -301,10 +301,15 @@ void RISCVFrameLowering::adjustReg(MachineBasicBlock &MBB,
     return;
 
   if (STI.getTargetABI() == RISCVABI::ABI_L64PCU128) {
-    if (Val < 0)
-      return adjustRegDownForUninit(MBB, MBBI, DL, DestReg, SrcReg, Val, Flag);
-    if (Val > 0 && Flag == MachineInstr::FrameDestroy)
-      return adjustRegUpForUninit(MBB, MBBI, DL, DestReg, SrcReg, Val, Flag);
+    assert(!(SrcReg != getSPReg() && DestReg == getSPReg()) && "Restoring stack cap from any other reg is not yet supported!");
+    if (Val < 0 && SrcReg == getSPReg()) {
+      assert(DestReg == SrcReg && "Unexpected adjustment of stack cap into other register");
+      return adjustUninitStackCap(MBB, MBBI, DL, Val, Flag);
+    }
+    if (Val >= 0 && SrcReg == getSPReg()) {
+      if (SrcReg == DestReg)
+        return adjustUninitStackCap(MBB, MBBI, DL, Val, Flag);
+    }
   }
 
   if (isInt<12>(Val)) {
@@ -365,41 +370,31 @@ void RISCVFrameLowering::adjustReg(MachineBasicBlock &MBB,
       .setMIFlag(Flag);
 }
 
-// TODO remove hardcoded constants
-// TODO support use without framepointer elimination
-void RISCVFrameLowering::adjustRegDownForUninit(MachineBasicBlock &MBB,
-                                              MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
-                                              Register DestReg, Register SrcReg, int64_t Amount,
-                                              MachineInstr::MIFlag Flag) const{
-  assert(DestReg == RISCV::C2 && SrcReg == RISCV::C2 && "Only stack pointer should be negatively adjusted, use -fomit-frame-pointer");
-  assert(Amount % 16 == 0 && "Offset not capability aligned");
-  assert(Amount < 0 && "Amount should be negative!");
-  const RISCVInstrInfo *TII = STI.getInstrInfo();
-  for (int64_t Idx = Amount; Idx < 0; Idx += 16)
-    BuildMI(MBB, MBBI, DL, TII->get(RISCV::USC_CAP), DestReg)
-      .addReg(RISCV::C0)
-      .addReg(SrcReg)
-      .setMIFlag(Flag);
-}
-
-void RISCVFrameLowering::adjustRegUpForUninit(MachineBasicBlock &MBB,
-                                              MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
-                                              Register DestReg, Register SrcReg, int64_t Amount,
+void RISCVFrameLowering::adjustUninitStackCap(MachineBasicBlock &MBB,
+                                              MachineBasicBlock::iterator MBBI, 
+                                              const DebugLoc &DL, int64_t Amount,
                                               MachineInstr::MIFlag Flag) const {
-  assert(DestReg == RISCV::C2 && SrcReg == RISCV::C2 && "Only stack pointer should be adjusted using adjustRegUpForUninit");
   assert(Amount % 16 == 0 && "Offset not capability aligned");
-  assert(Amount > 0 && "Amount should be negative!");
   const RISCVInstrInfo *TII = STI.getInstrInfo();
+  const Register StackCap = getSPReg();
+  if (Amount < 0) {
+  for (int64_t Idx = Amount; Idx < 0; Idx += 16)
+      BuildMI(MBB, MBBI, DL, TII->get(RISCV::USC_CAP), StackCap)
+      .addReg(RISCV::C0)
+        .addReg(StackCap)
+      .setMIFlag(Flag);
+  } else {
   for (int64_t Idx = 0; Idx < Amount; Idx += 16)
     BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSC_128))
       .addReg(RISCV::C0)
-      .addReg(SrcReg)
+        .addReg(StackCap)
       .addImm(Idx)
       .setMIFlag(Flag);
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), DestReg)
-    .addReg(SrcReg)
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), StackCap)
+      .addReg(StackCap)
     .addImm(Amount)
     .setMIFlag(Flag);
+  } 
 }
 
 // Returns the register used to hold the frame pointer.
