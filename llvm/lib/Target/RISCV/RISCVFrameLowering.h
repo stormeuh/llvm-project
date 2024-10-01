@@ -92,7 +92,11 @@ private:
                             MachineBasicBlock::iterator MBBI, 
                             const DebugLoc &DL, int64_t Amount,
                             MachineInstr::MIFlag Flag) const;
-
+  void deriveFromUninitStackCap(MachineBasicBlock &MBB,
+                                MachineBasicBlock::iterator MBBI, 
+                                const DebugLoc &DL, 
+                                Register TargetReg, int64_t Amount,
+                                MachineInstr::MIFlag Flag) const;
 };
 } // namespace llvm
 #endif

@@ -309,6 +309,7 @@ void RISCVFrameLowering::adjustReg(MachineBasicBlock &MBB,
     if (Val >= 0 && SrcReg == getSPReg()) {
       if (SrcReg == DestReg)
         return adjustUninitStackCap(MBB, MBBI, DL, Val, Flag);
+      return deriveFromUninitStackCap(MBB, MBBI, DL, DestReg, Val, Flag);
     }
   }
 
@@ -378,23 +379,52 @@ void RISCVFrameLowering::adjustUninitStackCap(MachineBasicBlock &MBB,
   const RISCVInstrInfo *TII = STI.getInstrInfo();
   const Register StackCap = getSPReg();
   if (Amount < 0) {
-  for (int64_t Idx = Amount; Idx < 0; Idx += 16)
+    for (int64_t Idx = Amount; Idx < 0; Idx += 16)
       BuildMI(MBB, MBBI, DL, TII->get(RISCV::USC_CAP), StackCap)
-      .addReg(RISCV::C0)
+        .addReg(RISCV::C0)
         .addReg(StackCap)
-      .setMIFlag(Flag);
+        .setMIFlag(Flag);
   } else {
-  for (int64_t Idx = 0; Idx < Amount; Idx += 16)
-    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSC_128))
-      .addReg(RISCV::C0)
+    for (int64_t Idx = 0; Idx < Amount; Idx += 16)
+      BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSC_128))
+        .addReg(RISCV::C0)
         .addReg(StackCap)
-      .addImm(Idx)
-      .setMIFlag(Flag);
+        .addImm(Idx)
+        .setMIFlag(Flag);
     BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), StackCap)
       .addReg(StackCap)
+      .addImm(Amount)
+      .setMIFlag(Flag);
+  } 
+}
+
+/* 
+  TODO: this way of deriving cuts a couple of corners which are problematic in the general case:
+  - Amount can only be as large as can be expressed with a 12 bit uint.
+  - Due to the limit on Amount, no regard is paid to rounding errors which may occur with
+    larger objects. An implementation which allows for this should take care to properly align
+    objects.
+*/
+void RISCVFrameLowering::deriveFromUninitStackCap(MachineBasicBlock &MBB,
+                                                  MachineBasicBlock::iterator MBBI, 
+                                                  const DebugLoc &DL, 
+                                                  Register TargetReg, int64_t Amount,
+                                                  MachineInstr::MIFlag Flag) const {
+  assert(Amount >= 0 && "Attempting to derive cap from stack cap with negative offset!");
+  assert(Amount < (2<<12) && "Object larger than 12 bit immediate, this is not yet supported.");
+  const RISCVInstrInfo *TII = STI.getInstrInfo();
+  const Register StackCap = getSPReg();
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetBoundsImm), TargetReg)
+    .addReg(StackCap)
     .addImm(Amount)
     .setMIFlag(Flag);
-  } 
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CDropUninit), TargetReg)
+    .addReg(TargetReg)
+    .setMIFlag(Flag);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), TargetReg)
+    .addReg(TargetReg)
+    .addImm(Amount)
+    .setMIFlag(Flag);
 }
 
 // Returns the register used to hold the frame pointer.
