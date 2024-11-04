@@ -51,7 +51,6 @@ using namespace llvm;
 
 #define DEBUG_TYPE "riscv-lower"
 
-#define CHERI_UNINIT_CCLEAR
 #define CHERI_UNINIT_SHRINK
 
 STATISTIC(NumTailCalls, "Number of tail calls");
@@ -75,6 +74,11 @@ static cl::opt<CHERIUninitEncapOpts>
                             clEnumVal(trampoline, "Trampoline"),
                             clEnumVal(isentry, "Indirect sentry")
                            ));
+
+static cl::opt<bool>
+    CHERIUninitClearRegs("cheri-uninit-clear-regs",
+    cl::desc("Clear registers upon call and return for uninit CC"),
+    cl::init(true));
 
 RISCVTargetLowering::RISCVTargetLowering(const TargetMachine &TM,
                                          const RISCVSubtarget &STI)
@@ -12129,9 +12133,8 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   }
 #endif
 
-#ifdef CHERI_UNINIT_CCLEAR
   // Emit register clearing node
-  if (CallConv == CallingConv::CHERI_Uninit) {
+  if (CHERIUninitClearRegs && CallConv == CallingConv::CHERI_Uninit) {
     SmallVector<SDValue, 8> Ops;
     const uint32_t *ClearMask = getClearMask(ArgLocs);
     Ops.push_back(Chain);
@@ -12141,7 +12144,6 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     Chain = DAG.getNode(RISCVISD::CLEAR_REGS, DL, NodeTys, Ops);
     Glue = Chain.getValue(1);
   }
-#endif
 
   // The first call operand is the chain and the second is the target address.
   SmallVector<SDValue, 8> Ops;
@@ -12346,8 +12348,7 @@ RISCVTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
     }
   }
 
-#ifdef CHERI_UNINIT_CCLEAR
-  if(CallConv == CallingConv::CHERI_Uninit) {
+  if(CHERIUninitClearRegs && CallConv == CallingConv::CHERI_Uninit) {
     SmallVector<SDValue, 3> CROps;
     const uint32_t *ClearMask = getClearMask(RVLocs);
     CROps.push_back(Chain);
@@ -12357,7 +12358,6 @@ RISCVTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
     Chain = DAG.getNode(RISCVISD::CLEAR_REGS, DL, CRNodeTys, CROps);
     Glue = Chain.getValue(1);
   }
-#endif
 
   RetOps[0] = Chain; // Update chain.
 

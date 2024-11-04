@@ -25,6 +25,11 @@
 
 using namespace llvm;
 
+static cl::opt<bool>
+    CHERIUninitClearCalleeStack("cheri-uninit-clear-callee-stack",
+    cl::desc("Clear callee stack upon return in uninit ABI"),
+    cl::init(true));
+
 // For now we use x18, a.k.a s2, as pointer to shadow call stack.
 // User should explicitly set -ffixed-x18 and not use x18 in their asm.
 static void emitSCSPrologue(MachineFunction &MF, MachineBasicBlock &MBB,
@@ -385,12 +390,14 @@ void RISCVFrameLowering::adjustUninitStackCap(MachineBasicBlock &MBB,
         .addReg(StackCap)
         .setMIFlag(Flag);
   } else {
-    for (int64_t Idx = 0; Idx < Amount; Idx += 16)
-      BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSC_128))
-        .addReg(RISCV::C0)
-        .addReg(StackCap)
-        .addImm(Idx)
-        .setMIFlag(Flag);
+    if (CHERIUninitClearCalleeStack) {
+      for (int64_t Idx = 0; Idx < Amount; Idx += 16)
+        BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSC_128))
+          .addReg(RISCV::C0)
+          .addReg(StackCap)
+          .addImm(Idx)
+          .setMIFlag(Flag);
+    }
     BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), StackCap)
       .addReg(StackCap)
       .addImm(Amount)
