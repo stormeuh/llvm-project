@@ -412,14 +412,21 @@ void RISCVFrameLowering::deriveFromUninitStackCap(MachineBasicBlock &MBB,
                                                   MachineInstr::MIFlag Flag) const {
   assert(Amount >= 0 && "Attempting to derive cap from stack cap with negative offset!");
   assert(Amount < (2<<12) && "Object larger than 12 bit immediate, this is not yet supported.");
+  assert(TargetReg == getFPReg() && "temp safeguard, target has to be fp");
   const RISCVInstrInfo *TII = STI.getInstrInfo();
+  const MachineFrameInfo &MFI = MBB.getParent()->getFrameInfo();
+  const Align StackAlign = MFI.getMaxAlign();
   const Register StackCap = getSPReg();
+  
+  uint64_t FrameSize = (uint64_t) Amount;
+  for (unsigned FrameIdx = 0; FrameIdx < MFI.getNumFixedObjects(); FrameIdx++){
+    FrameSize += MFI.getObjectSize(FrameIdx);
+  }
+  FrameSize = alignTo(FrameSize, StackAlign);
+
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetBoundsImm), TargetReg)
     .addReg(StackCap)
-    .addImm(Amount)
-    .setMIFlag(Flag);
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CDropUninit), TargetReg)
-    .addReg(TargetReg)
+    .addImm(FrameSize)
     .setMIFlag(Flag);
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), TargetReg)
     .addReg(TargetReg)
@@ -825,7 +832,12 @@ RISCVFrameLowering::getFrameIndexReference(const MachineFunction &MF, int FI,
     MaxCSFI = CSI[CSI.size() - 1].getFrameIdx();
   }
 
-  if (FI >= MinCSFI && FI <= MaxCSFI) {
+  bool IsUninitABI = RISCVABI::isUninitABI(STI.getTargetABI());
+  bool IsVarArgRef = FI == RVFI->getVarArgsFrameIndex();
+  bool IsUninitVarArgRef = IsUninitABI && IsVarArgRef;
+  assert((!IsUninitVarArgRef || !MFI.hasVarSizedObjects()) && "Having varsize arguments is not supported together with varargs on the Uninit ABI yet!");
+
+  if ((FI >= MinCSFI && FI <= MaxCSFI) || IsUninitVarArgRef) {
     FrameReg = getSPReg();
 
     if (FirstSPAdjustAmount)
