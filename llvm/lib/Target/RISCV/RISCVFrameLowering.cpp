@@ -11,12 +11,18 @@
 //===----------------------------------------------------------------------===//
 
 #include "RISCVFrameLowering.h"
+#include "MCTargetDesc/RISCVMCTargetDesc.h"
+#include "MCTargetDesc/RISCVMatInt.h"
+#include "RISCVInstrInfo.h"
 #include "RISCVMachineFunctionInfo.h"
 #include "RISCVSubtarget.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/Register.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/MC/MCDwarf.h"
@@ -25,10 +31,9 @@
 
 using namespace llvm;
 
-static cl::opt<bool>
-    CHERIUninitClearCalleeStack("cheri-uninit-clear-callee-stack",
-    cl::desc("Clear callee stack upon return in uninit ABI"),
-    cl::init(true));
+static cl::opt<bool> CHERIUninitClearCalleeStack(
+    "cheri-uninit-clear-callee-stack",
+    cl::desc("Clear callee stack upon return in uninit ABI"), cl::init(true));
 
 // For now we use x18, a.k.a s2, as pointer to shadow call stack.
 // User should explicitly set -ffixed-x18 and not use x18 in their asm.
@@ -306,15 +311,23 @@ void RISCVFrameLowering::adjustReg(MachineBasicBlock &MBB,
     return;
 
   if (STI.getTargetABI() == RISCVABI::ABI_L64PCU128) {
-    assert(!(SrcReg != getSPReg() && DestReg == getSPReg()) && "Restoring stack cap from any other reg is not yet supported!");
+    assert(!(SrcReg != getSPReg() && DestReg == getSPReg() && Val >= 0) &&
+           "Positive adjustment from other register into stack register not "
+           "supported!");
     if (Val < 0 && SrcReg == getSPReg()) {
-      assert(DestReg == SrcReg && "Unexpected adjustment of stack cap into other register");
+      assert(DestReg == SrcReg &&
+             "Unexpected adjustment of stack cap into other register");
       return adjustUninitStackCap(MBB, MBBI, DL, Val, Flag);
     }
     if (Val >= 0 && SrcReg == getSPReg()) {
       if (SrcReg == DestReg)
         return adjustUninitStackCap(MBB, MBBI, DL, Val, Flag);
       return deriveFromUninitStackCap(MBB, MBBI, DL, DestReg, Val, Flag);
+    }
+    if (Val < 0 && DestReg == getSPReg()) {
+      assert(SrcReg == getFPReg() &&
+             "Unexpected source from which CSP is being set.");
+      return setUninitStackCapAddress(MBB, MBBI, DL, RISCV::X8, Val, Flag);
     }
   }
 
@@ -377,8 +390,9 @@ void RISCVFrameLowering::adjustReg(MachineBasicBlock &MBB,
 }
 
 void RISCVFrameLowering::adjustUninitStackCap(MachineBasicBlock &MBB,
-                                              MachineBasicBlock::iterator MBBI, 
-                                              const DebugLoc &DL, int64_t Amount,
+                                              MachineBasicBlock::iterator MBBI,
+                                              const DebugLoc &DL,
+                                              int64_t Amount,
                                               MachineInstr::MIFlag Flag) const {
   assert(Amount % 16 == 0 && "Offset not capability aligned");
   const RISCVInstrInfo *TII = STI.getInstrInfo();
@@ -386,59 +400,115 @@ void RISCVFrameLowering::adjustUninitStackCap(MachineBasicBlock &MBB,
   if (Amount < 0) {
     for (int64_t Idx = Amount; Idx < 0; Idx += 16)
       BuildMI(MBB, MBBI, DL, TII->get(RISCV::USC_CAP), StackCap)
-        .addReg(RISCV::C0)
-        .addReg(StackCap)
-        .setMIFlag(Flag);
+          .addReg(RISCV::C0)
+          .addReg(StackCap)
+          .setMIFlag(Flag);
   } else {
     if (CHERIUninitClearCalleeStack) {
       for (int64_t Idx = 0; Idx < Amount; Idx += 16)
         BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSC_128))
-          .addReg(RISCV::C0)
-          .addReg(StackCap)
-          .addImm(Idx)
-          .setMIFlag(Flag);
+            .addReg(RISCV::C0)
+            .addReg(StackCap)
+            .addImm(Idx)
+            .setMIFlag(Flag);
     }
     BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), StackCap)
-      .addReg(StackCap)
-      .addImm(Amount)
-      .setMIFlag(Flag);
-  } 
+        .addReg(StackCap)
+        .addImm(Amount)
+        .setMIFlag(Flag);
+  }
 }
 
-/* 
-  TODO: this way of deriving cuts a couple of corners which are problematic in the general case:
-  - Amount can only be as large as can be expressed with a 12 bit uint.
-  - Due to the limit on Amount, no regard is paid to rounding errors which may occur with
-    larger objects. An implementation which allows for this should take care to properly align
-    objects.
+/*
+  TODO: this way of deriving cuts a couple of corners which are problematic in
+  the general case:
+  - No regard is paid to rounding errors which may occur with larger objects. An
+  implementation which allows for this should take care to properly align
+  objects.
 */
-void RISCVFrameLowering::deriveFromUninitStackCap(MachineBasicBlock &MBB,
-                                                  MachineBasicBlock::iterator MBBI, 
-                                                  const DebugLoc &DL, 
-                                                  Register TargetReg, int64_t Amount,
-                                                  MachineInstr::MIFlag Flag) const {
-  assert(Amount >= 0 && "Attempting to derive cap from stack cap with negative offset!");
-  assert(Amount < (2<<12) && "Object larger than 12 bit immediate, this is not yet supported.");
+void RISCVFrameLowering::deriveFromUninitStackCap(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+    const DebugLoc &DL, Register TargetReg, int64_t Amount,
+    MachineInstr::MIFlag Flag) const {
+  assert(Amount >= 0 &&
+         "Attempting to derive cap from stack cap with negative offset!");
   assert(TargetReg == getFPReg() && "temp safeguard, target has to be fp");
   const RISCVInstrInfo *TII = STI.getInstrInfo();
   const MachineFrameInfo &MFI = MBB.getParent()->getFrameInfo();
   const Align StackAlign = MFI.getMaxAlign();
   const Register StackCap = getSPReg();
-  
-  uint64_t FrameSize = (uint64_t) Amount;
-  for (unsigned FrameIdx = 0; FrameIdx < MFI.getNumFixedObjects(); FrameIdx++){
+  const Register ClobberedReg = RISCV::X31;
+
+  uint64_t FrameSize = (uint64_t)Amount;
+  for (unsigned FrameIdx = 0; FrameIdx < MFI.getNumFixedObjects(); FrameIdx++) {
     FrameSize += MFI.getObjectSize(FrameIdx);
   }
   FrameSize = alignTo(FrameSize, StackAlign);
-
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetBoundsImm), TargetReg)
-    .addReg(StackCap)
-    .addImm(FrameSize)
-    .setMIFlag(Flag);
+  MachineInstrBuilder CSetBoundsBuilder;
+  // If the framesize exceeds the maximum immediate size, emit a sequence of
+  // instructions to build it.
+  if (FrameSize >= (1 << 11)) {
+    assert(Amount < (1 << 11) && "Larger objects are supposed to be allocated in a different way!");
+    TII->movImm(MBB, MBBI, DL, ClobberedReg, FrameSize, Flag);
+    CSetBoundsBuilder =
+        BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetBounds), TargetReg)
+            .addReg(StackCap)
+            .addReg(ClobberedReg);
+  } else {
+    // Otherwise adjust with immediates directly
+    CSetBoundsBuilder =
+        BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetBoundsImm), TargetReg)
+            .addReg(StackCap)
+            .addImm(FrameSize);
+  }
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), TargetReg)
-    .addReg(TargetReg)
-    .addImm(Amount)
-    .setMIFlag(Flag);
+            .addReg(TargetReg)
+            .addImm(Amount)
+            .setMIFlag(Flag);
+  CSetBoundsBuilder.setMIFlag(Flag);
+}
+
+void RISCVFrameLowering::setUninitStackCapAddress(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+    const DebugLoc &DL, Register SourceReg, int64_t Amount,
+    MachineInstr::MIFlag Flag) const {
+  assert(Amount < 0 && "Expected adjustment to be negative!");
+  assert(SourceReg == RISCV::X8 &&
+         "Expected source reg to be (integer) frame reg!");
+
+  const RISCVInstrInfo *TII = STI.getInstrInfo();
+  const Register StackCap = getSPReg();
+  const Register ClobberedReg = RISCV::X31;
+
+  // BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), ClobberedReg)
+  //     .addReg(SourceReg)
+  //     .addImm(fmax(Amount, -2048))
+  //     .setMIFlag(Flag);
+
+  // for (int64_t RemainingAmount = Amount + 2048; RemainingAmount < 0;
+  //      RemainingAmount += 2048)
+  //   BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), ClobberedReg)
+  //       .addReg(ClobberedReg)
+  //       .addImm(fmax(RemainingAmount, -2048))
+  //       .setMIFlag(Flag);
+
+  if (Amount < -(1<<11)) {
+    TII->movImm(MBB, MBBI, DL, ClobberedReg, Amount, Flag);
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), ClobberedReg)
+      .addReg(SourceReg)
+      .addReg(ClobberedReg)
+      .setMIFlag(Flag);
+  } else {
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), ClobberedReg)
+      .addReg(SourceReg)
+      .addImm(Amount)
+      .setMIFlag(Flag);
+  }
+
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetAddr), StackCap)
+      .addReg(StackCap)
+      .addReg(ClobberedReg)
+      .setMIFlag(Flag);
 }
 
 // Returns the register used to hold the frame pointer.
@@ -839,12 +909,13 @@ RISCVFrameLowering::getFrameIndexReference(const MachineFunction &MF, int FI,
     MaxCSFI = CSI[CSI.size() - 1].getFrameIdx();
   }
 
-  bool IsUninitABI = RISCVABI::isUninitABI(STI.getTargetABI());
-  bool IsVarArgRef = FI == RVFI->getVarArgsFrameIndex();
-  bool IsUninitVarArgRef = IsUninitABI && IsVarArgRef;
-  assert((!IsUninitVarArgRef || !MFI.hasVarSizedObjects()) && "Having varsize arguments is not supported together with varargs on the Uninit ABI yet!");
+  // bool IsUninitABI = RISCVABI::isUninitABI(STI.getTargetABI());
+  // bool IsVarArgRef = FI == RVFI->getVarArgsFrameIndex();
+  // bool IsUninitVarArgRef = IsUninitABI && IsVarArgRef;
+  // assert((!IsUninitVarArgRef || !MFI.hasVarSizedObjects()) && "Having varsize
+  // arguments is not supported together with varargs on the Uninit ABI yet!");
 
-  if ((FI >= MinCSFI && FI <= MaxCSFI) || IsUninitVarArgRef) {
+  if ((FI >= MinCSFI && FI <= MaxCSFI)) { // || IsUninitVarArgRef) {
     FrameReg = getSPReg();
 
     if (FirstSPAdjustAmount)

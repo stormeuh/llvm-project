@@ -116,6 +116,7 @@ def build_run_list(test, run_lines, verbose=False):
             llc_cmd = llc_cmd.replace("%cheri128_llc", "llc -mtriple=mips64-unknown-freebsd -mcpu=cheri128 -mattr=+cheri128")
             llc_cmd = llc_cmd.replace("%riscv32_cheri_purecap_llc", "llc -mtriple=riscv32-unknown-freebsd -target-abi il32pc64 -mattr=+xcheri,+cap-mode")
             llc_cmd = llc_cmd.replace("%riscv64_cheri_purecap_llc", "llc -mtriple=riscv64-unknown-freebsd -target-abi l64pc128 -mattr=+xcheri,+cap-mode")
+            llc_cmd = llc_cmd.replace("%riscv64_cheri_uninit_llc", "llc -mtriple=riscv64-unknown-freebsd -target-abi l64pcu128 -mattr=+xcheri,+cap-mode")
             llc_cmd = llc_cmd.replace("%riscv32_cheri_llc", "llc -mtriple=riscv32-unknown-freebsd -mattr=+xcheri")
             llc_cmd = llc_cmd.replace("%riscv64_cheri_llc", "llc -mtriple=riscv64-unknown-freebsd -mattr=+xcheri")
 

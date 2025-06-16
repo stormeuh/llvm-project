@@ -13,6 +13,8 @@
 #ifndef LLVM_LIB_TARGET_RISCV_RISCVFRAMELOWERING_H
 #define LLVM_LIB_TARGET_RISCV_RISCVFRAMELOWERING_H
 
+#include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/Support/TypeSize.h"
 
@@ -89,13 +91,18 @@ private:
   std::pair<int64_t, Align>
   assignRVVStackObjectOffsets(MachineFunction &MF) const;
   void adjustUninitStackCap(MachineBasicBlock &MBB,
-                            MachineBasicBlock::iterator MBBI, 
+                            MachineBasicBlock::iterator MBBI,
                             const DebugLoc &DL, int64_t Amount,
                             MachineInstr::MIFlag Flag) const;
   void deriveFromUninitStackCap(MachineBasicBlock &MBB,
-                                MachineBasicBlock::iterator MBBI, 
-                                const DebugLoc &DL, 
-                                Register TargetReg, int64_t Amount,
+                                MachineBasicBlock::iterator MBBI,
+                                const DebugLoc &DL, Register TargetReg,
+                                int64_t Amount,
+                                MachineInstr::MIFlag Flag) const;
+  void setUninitStackCapAddress(MachineBasicBlock &MBB,
+                                MachineBasicBlock::iterator MBBI,
+                                const DebugLoc &DL, Register SourceReg,
+                                int64_t Amount,
                                 MachineInstr::MIFlag Flag) const;
 };
 } // namespace llvm
