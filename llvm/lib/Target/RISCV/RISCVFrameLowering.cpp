@@ -12,15 +12,16 @@
 
 #include "RISCVFrameLowering.h"
 #include "MCTargetDesc/RISCVMCTargetDesc.h"
-#include "MCTargetDesc/RISCVMatInt.h"
 #include "RISCVInstrInfo.h"
 #include "RISCVMachineFunctionInfo.h"
+#include "RISCVRegisterInfo.h"
 #include "RISCVSubtarget.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/Register.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
@@ -28,6 +29,7 @@
 #include "llvm/MC/MCDwarf.h"
 
 #include <algorithm>
+#include <cstdint>
 
 using namespace llvm;
 
@@ -396,6 +398,7 @@ void RISCVFrameLowering::adjustUninitStackCap(MachineBasicBlock &MBB,
                                               MachineInstr::MIFlag Flag) const {
   assert(Amount % 16 == 0 && "Offset not capability aligned");
   const RISCVInstrInfo *TII = STI.getInstrInfo();
+  MachineRegisterInfo &MRI = MBB.getParent()->getRegInfo();
   const Register StackCap = getSPReg();
   if (Amount < 0) {
     for (int64_t Idx = Amount; Idx < 0; Idx += 16)
@@ -405,17 +408,45 @@ void RISCVFrameLowering::adjustUninitStackCap(MachineBasicBlock &MBB,
           .setMIFlag(Flag);
   } else {
     if (CHERIUninitClearCalleeStack) {
-      for (int64_t Idx = 0; Idx < Amount; Idx += 16)
-        BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSC_128))
-            .addReg(RISCV::C0)
+      /* Build a sequence like this:
+      csc c0, 0(csp)
+      ...
+      csc c0, 2016(csp)
+      cincoffset csp, csp, 2032
+      csc c0, 0(csp)
+      ...
+      csc c0, ...(csp)
+      cincoffset csp, csp, ...
+      */ 
+      int64_t MaxImmediate = 2032;
+      for(int64_t SubAmount = Amount; SubAmount > 0; SubAmount -= MaxImmediate){
+        int64_t LoopAmount = std::min(SubAmount, MaxImmediate);
+        for (int64_t Offset = 0; Offset < LoopAmount; Offset += 16)
+          BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSC_128))
+              .addReg(RISCV::C0)
+              .addReg(StackCap)
+              .addImm(Offset)
+              .setMIFlag(Flag);
+        BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), StackCap)
             .addReg(StackCap)
-            .addImm(Idx)
+            .addImm(LoopAmount)
             .setMIFlag(Flag);
+      }
+    } else {
+      if (!isInt<12>(Amount)) {
+        Register AmountReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
+        TII->movImm(MBB, MBBI, DL, AmountReg, Amount, Flag);
+        BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffset), StackCap)
+          .addReg(StackCap)
+          .addReg(AmountReg)
+          .setMIFlag(Flag);
+      } else {
+        BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), StackCap)
+          .addReg(StackCap)
+          .addImm(Amount)
+          .setMIFlag(Flag);
+      }
     }
-    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), StackCap)
-        .addReg(StackCap)
-        .addImm(Amount)
-        .setMIFlag(Flag);
   }
 }
 
@@ -437,7 +468,8 @@ void RISCVFrameLowering::deriveFromUninitStackCap(
   const MachineFrameInfo &MFI = MBB.getParent()->getFrameInfo();
   const Align StackAlign = MFI.getMaxAlign();
   const Register StackCap = getSPReg();
-  const Register ClobberedReg = RISCV::X31;
+  MachineRegisterInfo &MRI = MBB.getParent()->getRegInfo();
+  const Register TempReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
 
   uint64_t FrameSize = (uint64_t)Amount;
   for (unsigned FrameIdx = 0; FrameIdx < MFI.getNumFixedObjects(); FrameIdx++) {
@@ -449,11 +481,11 @@ void RISCVFrameLowering::deriveFromUninitStackCap(
   // instructions to build it.
   if (FrameSize >= (1 << 11)) {
     assert(Amount < (1 << 11) && "Larger objects are supposed to be allocated in a different way!");
-    TII->movImm(MBB, MBBI, DL, ClobberedReg, FrameSize, Flag);
+    TII->movImm(MBB, MBBI, DL, TempReg, FrameSize, Flag);
     CSetBoundsBuilder =
         BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetBounds), TargetReg)
             .addReg(StackCap)
-            .addReg(ClobberedReg);
+            .addReg(TempReg);
   } else {
     // Otherwise adjust with immediates directly
     CSetBoundsBuilder =
@@ -478,28 +510,17 @@ void RISCVFrameLowering::setUninitStackCapAddress(
 
   const RISCVInstrInfo *TII = STI.getInstrInfo();
   const Register StackCap = getSPReg();
-  const Register ClobberedReg = RISCV::X31;
-
-  // BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), ClobberedReg)
-  //     .addReg(SourceReg)
-  //     .addImm(fmax(Amount, -2048))
-  //     .setMIFlag(Flag);
-
-  // for (int64_t RemainingAmount = Amount + 2048; RemainingAmount < 0;
-  //      RemainingAmount += 2048)
-  //   BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), ClobberedReg)
-  //       .addReg(ClobberedReg)
-  //       .addImm(fmax(RemainingAmount, -2048))
-  //       .setMIFlag(Flag);
+  MachineRegisterInfo &MRI = MBB.getParent()->getRegInfo();
+  const Register TempReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
 
   if (Amount < -(1<<11)) {
-    TII->movImm(MBB, MBBI, DL, ClobberedReg, Amount, Flag);
-    BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), ClobberedReg)
+    TII->movImm(MBB, MBBI, DL, TempReg, Amount, Flag);
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADD), TempReg)
       .addReg(SourceReg)
-      .addReg(ClobberedReg)
+      .addReg(TempReg)
       .setMIFlag(Flag);
   } else {
-    BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), ClobberedReg)
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), TempReg)
       .addReg(SourceReg)
       .addImm(Amount)
       .setMIFlag(Flag);
@@ -507,7 +528,7 @@ void RISCVFrameLowering::setUninitStackCapAddress(
 
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetAddr), StackCap)
       .addReg(StackCap)
-      .addReg(ClobberedReg)
+      .addReg(TempReg)
       .setMIFlag(Flag);
 }
 
