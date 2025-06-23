@@ -11521,7 +11521,7 @@ SDValue emitActivationRecordCode(SDValue Chain, SDLoc &DL, SelectionDAG &DAG,
 
 std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
     SDValue Chain, SDLoc &DL, SelectionDAG &DAG, MachineFunction &MF, 
-    EVT PtrVT, EVT XLenVT) 
+    EVT PtrVT, EVT XLenVT, bool hasFramePointer) 
     {
 
   // factor sizing information out of code below
@@ -11529,9 +11529,13 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
   unsigned PtrVTSize = PtrVT.getFixedSizeInBits()/8;
   
   assert(CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry);
-  unsigned ActrecSize = CHERIUninitReturnEncap == trampoline 
-                      ? (ActrecCodeSize + XLenVTSize + PtrVTSize * 2)
-                      : (PtrVTSize * 3); // assume isentry in other case
+  // unsigned ActrecSize = CHERIUninitReturnEncap == trampoline 
+  //                     ? (ActrecCodeSize + XLenVTSize + PtrVTSize * 2)
+  //                     : (PtrVTSize * 3); // assume isentry in other case
+  unsigned ActrecSize = PtrVTSize * 2;
+  if (CHERIUninitReturnEncap == trampoline) ActrecSize += ActrecCodeSize;
+  if (hasFramePointer) 
+    ActrecSize += CHERIUninitReturnEncap == trampoline ? XLenVTSize : PtrVTSize;
   unsigned ActrecOffset = CHERIUninitReturnEncap == trampoline
                         ? (ActrecSize - ActrecCodeSize)
                         : 0;
@@ -11560,20 +11564,22 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
   OutChain = DAG.getStore(OutChain, DL, CSPReg, NextPtr, MachinePointerInfo(200));
   NextPtr = DAG.getPointerAdd(DL, NextPtr, PtrVTSize); // advance pointer
 
-  if (CHERIUninitReturnEncap == trampoline){ // trampoline specific stuff
-    // emit frame pointer offset calculation, store and advance pointer
-    SDValue FPOffset = DAG.getNode(ISD::SUB, DL, XLenVT,
-                                  DAG.getRegister(RISCV::X8, XLenVT),
-                                  DAG.getRegister(RISCV::X2, XLenVT));
-    OutChain = DAG.getStore(OutChain, DL, FPOffset, NextPtr, MachinePointerInfo());
-    NextPtr = DAG.getPointerAdd(DL, NextPtr, XLenVTSize); // advance pointer
+  if (hasFramePointer) { // store frame pointer if present
+    if (CHERIUninitReturnEncap == trampoline){ // trampoline specific stuff
+      // emit frame pointer offset calculation, store and advance pointer
+      SDValue FPIntVal = DAG.getNode(ISD::PTRTOINT, DL, XLenVT, DAG.getRegister(RISCV::C8, PtrVT));
+      SDValue SPIntVal = DAG.getNode(ISD::PTRTOINT, DL, XLenVT, DAG.getRegister(RISCV::C2, PtrVT));
+      SDValue FPOffset = DAG.getNode(ISD::SUB, DL, XLenVT, FPIntVal, SPIntVal);
+      OutChain = DAG.getStore(OutChain, DL, FPOffset, NextPtr, MachinePointerInfo());
+      NextPtr = DAG.getPointerAdd(DL, NextPtr, XLenVTSize); // advance pointer
 
-    // emit code portion of activation record and advance pointer
-    OutChain = emitActivationRecordCode(OutChain, DL, DAG, NextPtr);    
-  } else if (CHERIUninitReturnEncap == isentry) { // isentry specific stuff
-    // store full CFP instead of offset like trampoline
-    SDValue CFPReg = DAG.getRegister(RISCV::C8, PtrVT);
-    OutChain = DAG.getStore(OutChain, DL, CFPReg, NextPtr, MachinePointerInfo(200));
+      // emit code portion of activation record and advance pointer
+      OutChain = emitActivationRecordCode(OutChain, DL, DAG, NextPtr);    
+    } else if (CHERIUninitReturnEncap == isentry) { // isentry specific stuff
+      // store full CFP instead of offset like trampoline
+      SDValue CFPReg = DAG.getRegister(RISCV::C8, PtrVT);
+      OutChain = DAG.getStore(OutChain, DL, CFPReg, NextPtr, MachinePointerInfo(200));
+    }
   }
 
   // Place bounds on the activation record capability
@@ -11858,10 +11864,11 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   bool IsVarArg = CLI.IsVarArg;
   // TODO-CHERI: Stack address space (and uses)
   EVT PtrVT = getPointerTy(DAG.getDataLayout(),
-                           DAG.getDataLayout().getAllocaAddrSpace());
+  DAG.getDataLayout().getAllocaAddrSpace());
   MVT XLenVT = Subtarget.getXLenVT();
-
+  
   MachineFunction &MF = DAG.getMachineFunction();
+  bool hasFramePointer = RISCVGenRegisterInfo::getFrameLowering(MF)->hasFP(MF);
 
   // Analyze the operands of the call, assigning locations to each operand.
   SmallVector<CCValAssign, 16> ArgLocs;
@@ -11921,7 +11928,7 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   if(CHERIUninitReturnEncap != none) {
     // Emit activation record onto the stack
     if (CallConv == CallingConv::CHERI_Uninit) {
-      ActrecNodes = emitActivationRecord(Chain, DL, DAG, MF, PtrVT, XLenVT);
+      ActrecNodes = emitActivationRecord(Chain, DL, DAG, MF, PtrVT, XLenVT, hasFramePointer);
       Chain = std::get<0>(ActrecNodes);
     }
   }
@@ -12202,16 +12209,19 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     // load activation record pointer and calculate offsets
     SDValue ActrecCap = DAG.getCopyFromReg(Chain, DL, RISCV::C31, PtrVT, Glue);
     SDValue StackCapField = DAG.getPointerAdd(DL, ActrecCap, 16);
-    SDValue FrameCapField = DAG.getPointerAdd(DL, ActrecCap, 32);
-
+    
     // emit loads and moves to put into correct registers
     // TODO make load put cap immediately into correct register
     SDValue StackCap = DAG.getLoad(PtrVT, DL, ActrecCap.getValue(1),
-                                   StackCapField, MachinePointerInfo());
+    StackCapField, MachinePointerInfo());
     Chain = DAG.getCopyToReg(StackCap.getValue(1), DL, RISCV::C2, StackCap);
+    
+    if (hasFramePointer) {
+    SDValue FrameCapField = DAG.getPointerAdd(DL, ActrecCap, 32);
     SDValue FrameCap =
         DAG.getLoad(PtrVT, DL, Chain, FrameCapField, MachinePointerInfo());
     Chain = DAG.getCopyToReg(Chain, DL, RISCV::C8, FrameCap, SDValue());
+    }
 
     // glue to CALLSEQ_END node
     Glue = Chain.getValue(1);
