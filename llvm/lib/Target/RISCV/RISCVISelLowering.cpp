@@ -80,6 +80,11 @@ static cl::opt<bool>
     cl::desc("Clear registers upon call and return for uninit CC"),
     cl::init(true));
 
+static cl::opt<unsigned> CHERIUninitStackAlignment(
+    "cheri-uninit-stack-alignment",
+    cl::desc("Alignment of the stack required on secure calls (in powers of 2, default: 13)"),
+    cl::init(13));
+
 RISCVTargetLowering::RISCVTargetLowering(const TargetMachine &TM,
                                          const RISCVSubtarget &STI)
     : TargetLowering(TM), Subtarget(STI) {
@@ -10666,6 +10671,71 @@ static MachineBasicBlock *emitSelectPseudo(MachineInstr &MI,
   return TailMBB;
 }
 
+static MachineBasicBlock *
+emitUninitRealignStack(MachineInstr &MI, MachineBasicBlock *BB,
+                       const RISCVSubtarget &Subtarget) {
+  MachineFunction &MF = *BB->getParent();
+  const BasicBlock *LLVM_BB = BB->getBasicBlock();
+  DebugLoc DL = MI.getDebugLoc();
+  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+
+  // assume register is stackreg
+  Register StackCapReg = RISCV::C2;
+  Register StackIntReg = RISCV::X2;
+
+  // create exit MBB
+  MachineBasicBlock *LoopDoneMBB = MF.CreateMachineBasicBlock(LLVM_BB);
+  MF.insert(++BB->getIterator(), LoopDoneMBB);
+  // Move rest of instructions to loop exit MBB
+  LoopDoneMBB->splice(LoopDoneMBB->end(), BB, MI, BB->end());
+  // Update machine-CFG edges
+  LoopDoneMBB->transferSuccessorsAndUpdatePHIs(BB);
+
+  // get argument
+  unsigned P2Align = MI.getOperand(0).getImm();
+  MI.eraseFromParent();
+
+  // setup: create shift amount
+  MachineRegisterInfo &RegInfo = MF.getRegInfo();
+  Register TempReg = RegInfo.createVirtualRegister(&RISCV::GPRRegClass);
+  // Register TempReg = RISCV::X31;
+  BuildMI(BB, DL, TII->get(RISCV::SRLI), TempReg)
+      .addReg(StackIntReg)
+      .addImm(P2Align);
+  Register AlignTarget = RegInfo.createVirtualRegister(&RISCV::GPRRegClass);
+  BuildMI(BB, DL, TII->get(RISCV::SLLI), AlignTarget)
+      .addReg(TempReg)
+      .addImm(P2Align);
+
+  // create loop condition MBB
+  MachineBasicBlock *LoopCondMBB = MF.CreateMachineBasicBlock(LLVM_BB);
+  MF.insert(++BB->getIterator(), LoopCondMBB);
+  BB->addSuccessor(LoopCondMBB);
+  LoopCondMBB->addSuccessor(LoopDoneMBB);
+  LoopCondMBB->addLiveIn(AlignTarget);
+
+  // create loop body MBB
+  MachineBasicBlock *LoopBodyMBB = MF.CreateMachineBasicBlock(LLVM_BB);
+  MF.insert(++LoopCondMBB->getIterator(), LoopBodyMBB);
+  LoopCondMBB->addSuccessor(LoopBodyMBB);
+  LoopBodyMBB->addSuccessor(LoopCondMBB);
+
+  // add loop condition: exit when stack reg equal to temp
+  BuildMI(LoopCondMBB, DL, TII->get(RISCV::BEQ))
+      .addReg(AlignTarget)
+      .addReg(StackIntReg)
+      .addMBB(LoopDoneMBB);
+
+  // loop body: do uninit store and jump to condition
+  BuildMI(LoopBodyMBB, DL, TII->get(RISCV::USC_CAP), StackCapReg)
+      .addReg(RISCV::C0)
+      .addReg(StackCapReg);
+  BuildMI(LoopBodyMBB, DL, TII->get(RISCV::PseudoCBR))
+      .addMBB(LoopCondMBB);
+
+  return LoopDoneMBB;
+}
+
 MachineBasicBlock *
 RISCVTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
                                                  MachineBasicBlock *BB) const {
@@ -10700,6 +10770,8 @@ RISCVTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     return emitQuietFCMP(MI, BB, RISCV::FLE_D, RISCV::FEQ_D, Subtarget);
   case RISCV::PseudoQuietFLT_D:
     return emitQuietFCMP(MI, BB, RISCV::FLT_D, RISCV::FEQ_D, Subtarget);
+  case RISCV::PseudoUninitRealignStack:
+    return emitUninitRealignStack(MI, BB, Subtarget);
   }
 }
 
@@ -11913,6 +11985,12 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     }
   }
 
+  if (CallConv == CallingConv::CHERI_Uninit){
+    Chain = DAG.getNode(RISCVISD::UNINIT_REALIGN_STACK, DL,
+      MVT::Other,
+      {Chain, DAG.getConstant(CHERIUninitStackAlignment, DL, XLenVT)});
+  }
+
   // Copy argument values to their designated locations.
   SmallVector<std::pair<Register, SDValue>, 8> RegsToPass;
   SmallVector<SDValue, 8> MemOpChains;
@@ -12579,6 +12657,7 @@ const char *RISCVTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(CAP_SHRINK_STACK)
   NODE_NAME_CASE(UNINIT_CALL)
   NODE_NAME_CASE(RET_FLAG_INDIRECT)
+  NODE_NAME_CASE(UNINIT_REALIGN_STACK)
   }
   // clang-format on
   return nullptr;

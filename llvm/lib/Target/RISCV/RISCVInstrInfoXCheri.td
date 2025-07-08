@@ -1161,6 +1161,12 @@ def riscv_clear_regs : SDNode<"RISCVISD::CLEAR_REGS", SDT_RISCVClearRegs,
 let Predicates = [HasCheri, IsCapMode], hasSideEffects = 1, Size = 16 in
 def PseudoCClear : Pseudo<(outs), (ins), [(riscv_clear_regs)]>;
 
+def SDT_RISCVUninitStackRealign : SDTypeProfile<0, 1, [SDTCisInt<0>]>;
+def riscv_uninit_realign_stack : SDNode<"RISCVISD::UNINIT_REALIGN_STACK", SDT_RISCVUninitStackRealign, [SDNPHasChain, SDNPMayStore]>;
+
+let Predicates = [HasCheri, IsCapMode], hasSideEffects = 1, mayLoad = 0, mayStore = 1, usesCustomInserter = 1 in
+def PseudoUninitRealignStack : Pseudo<(outs), (ins uimm12:$align), [(riscv_uninit_realign_stack uimm12:$align)]>;
+
 let Predicates = [HasCheri, IsCapMode] in {
 let hasSideEffects = 0, mayLoad = 0, mayStore = 0, isCodeGenOnly = 0,
     isAsmParserOnly = 1, Size = 8 in
