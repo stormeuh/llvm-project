@@ -456,6 +456,8 @@ void RISCVFrameLowering::adjustUninitStackCap(MachineBasicBlock &MBB,
   - No regard is paid to rounding errors which may occur with larger objects. An
   implementation which allows for this should take care to properly align
   objects.
+  - Varargs bounds can't statically be set, so the bounds of the frame pointer
+  are set with a very large margin to make sure all arguments are in bounds.
 */
 void RISCVFrameLowering::deriveFromUninitStackCap(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
@@ -472,9 +474,15 @@ void RISCVFrameLowering::deriveFromUninitStackCap(
   const Register TempReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
 
   uint64_t FrameSize = (uint64_t)Amount;
-  for (unsigned FrameIdx = 0; FrameIdx < MFI.getNumFixedObjects(); FrameIdx++) {
-    FrameSize += MFI.getObjectSize(FrameIdx);
+  // for some reason stack passed variables are not included in framesize
+  for (auto ObjIdx = MFI.getObjectIndexBegin(); ObjIdx < MFI.getObjectIndexEnd(); ObjIdx++)
+  {
+    if (MFI.getObjectOffset(ObjIdx) >= 0) {
+      FrameSize += MFI.getObjectSize(ObjIdx);
+    }
   }
+  if (MFI.hasVAStart()) 
+    FrameSize += 1024; // add an error margin if va_start is called
   FrameSize = alignTo(FrameSize, StackAlign);
   MachineInstrBuilder CSetBoundsBuilder;
   // If the framesize exceeds the maximum immediate size, emit a sequence of
