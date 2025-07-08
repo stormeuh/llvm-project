@@ -11491,62 +11491,56 @@ static uint32_t *getClearMask(
   return TempMask;
 }
 
-// below was moved to CHERIUninitTrampoline.h so it can be automatically generated
-// static SmallVector<uint64_t, 3> ActrecCode = {
-//   0x0302a08f020002db,
-//   0x0182a3030202a10f,
-//   0x000080672261045b
-// };
-
-static unsigned ActrecCodeSize = 8 * ActrecCode.size();
-
-SDValue emitActivationRecordCode(SDValue Chain, SDLoc &DL, SelectionDAG &DAG, 
-                                 SDValue ActrecPtr) {
-
+SmallVector<SDValue,8> emitActivationRecordCode(SDValue Chain, SDLoc &DL, SelectionDAG &DAG, 
+                                 SDValue ActrecPtr, SmallVector<uint64_t, 3> ActrecCode) {
   MVT DWVT = MVT::getIntegerVT(64);
-  SDValue OutChain = Chain;
+  SmallVector<SDValue,8> ReturnChains;
   SDValue NextPtr = ActrecPtr;
 
   for(auto *ActrecElem = ActrecCode.begin(); 
       ActrecElem != ActrecCode.end(); ++ActrecElem){
 
     SDValue ActrecConst = DAG.getConstant(*ActrecElem, DL, DWVT);
-    OutChain = DAG.getStore(OutChain, DL, ActrecConst, NextPtr, MachinePointerInfo());
+    ReturnChains.push_back(DAG.getStore(Chain, DL, ActrecConst, NextPtr, MachinePointerInfo()));
     if (ActrecElem + 1 != ActrecCode.end())
       NextPtr = DAG.getPointerAdd(DL, NextPtr, 8);
   }
 
-  return OutChain;
+  return ReturnChains;
 }
 
 std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
     SDValue Chain, SDLoc &DL, SelectionDAG &DAG, MachineFunction &MF, 
-    EVT PtrVT, EVT XLenVT, bool hasFramePointer) 
+    EVT PtrVT, EVT XLenVT, bool HasFP) 
     {
+  assert(CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry);
 
   // factor sizing information out of code below
-  unsigned XLenVTSize = XLenVT.getFixedSizeInBits()/8;
-  unsigned PtrVTSize = PtrVT.getFixedSizeInBits()/8;
-  
-  assert(CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry);
-  // unsigned ActrecSize = CHERIUninitReturnEncap == trampoline 
-  //                     ? (ActrecCodeSize + XLenVTSize + PtrVTSize * 2)
-  //                     : (PtrVTSize * 3); // assume isentry in other case
-  unsigned ActrecSize = PtrVTSize * 2;
+  unsigned PtrVTSize = PtrVT.getStoreSize();
+  Align PtrVTAlign = MF.getSubtarget<RISCVSubtarget>().getRegisterInfo()->getSpillAlign(RISCV::GPCRRegClass);
+
+  SmallVector<uint64_t, 3> ActrecCode = HasFP ? ActrecCodeFp : ActrecCodeNoFp;
+  unsigned ActrecCodeSize = ActrecCode.size() * 8;
+
+  unsigned ActrecSize = PtrVTSize * 2; // minimum size is stack cap and return cap
   if (CHERIUninitReturnEncap == trampoline) ActrecSize += ActrecCodeSize;
-  if (hasFramePointer) 
-    ActrecSize += CHERIUninitReturnEncap == trampoline ? XLenVTSize : PtrVTSize;
+  if (HasFP) ActrecSize += PtrVTSize;
   unsigned ActrecOffset = CHERIUninitReturnEncap == trampoline
                         ? (ActrecSize - ActrecCodeSize)
                         : 0;
 
   // create stack object and obtain pointer to it
-  Align PtrVTAlign = MF.getSubtarget<RISCVSubtarget>().getRegisterInfo()->getSpillAlign(RISCV::GPCRRegClass);
   int FI = MF.getFrameInfo().CreateStackObject(ActrecSize, PtrVTAlign, /*isSS*/ false);
   SDValue ActrecPtr = DAG.getFrameIndex(FI, PtrVT);
-
-  SDValue OutChain = Chain;
+  
   SDValue NextPtr = ActrecPtr;
+  SmallVector<SDValue, 8> ActrecStores;
+  
+  if (HasFP) { // store frame pointer if present
+    SDValue CFPReg = DAG.getRegister(RISCV::C8, PtrVT);
+    ActrecStores.push_back(DAG.getStore(Chain, DL, CFPReg, NextPtr, MachinePointerInfo(200)));
+    NextPtr = DAG.getPointerAdd(DL, NextPtr, PtrVTSize); // advance pointer
+  }
 
   // emit return address
   // create placeholder for return address, to be filled in later when node actually exists
@@ -11556,31 +11550,16 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
   // to fix, see definition of bare_symbol in RISCVInstrFormats.td
   SDValue RAAddrSym = DAG.getMCSymbol(RLabel, XLenVT);
   SDValue RAAddr = SDValue(DAG.getMachineNode(RISCV::PseudoCLLC, DL, PtrVT, RAAddrSym), 0);
-  OutChain = DAG.getStore(OutChain, DL, RAAddr, NextPtr, MachinePointerInfo(), PtrVTAlign);
+  ActrecStores.push_back(DAG.getStore(Chain, DL, RAAddr, NextPtr, MachinePointerInfo(), PtrVTAlign));
   NextPtr = DAG.getPointerAdd(DL, NextPtr, PtrVTSize); // advance pointer
 
   // emit stack capability store
   SDValue CSPReg = DAG.getRegister(RISCV::C2, PtrVT);
-  OutChain = DAG.getStore(OutChain, DL, CSPReg, NextPtr, MachinePointerInfo(200));
+  ActrecStores.push_back(DAG.getStore(Chain, DL, CSPReg, NextPtr, MachinePointerInfo(200)));
   NextPtr = DAG.getPointerAdd(DL, NextPtr, PtrVTSize); // advance pointer
 
-  if (hasFramePointer) { // store frame pointer if present
-    if (CHERIUninitReturnEncap == trampoline){ // trampoline specific stuff
-      // emit frame pointer offset calculation, store and advance pointer
-      SDValue FPIntVal = DAG.getNode(ISD::PTRTOINT, DL, XLenVT, DAG.getRegister(RISCV::C8, PtrVT));
-      SDValue SPIntVal = DAG.getNode(ISD::PTRTOINT, DL, XLenVT, DAG.getRegister(RISCV::C2, PtrVT));
-      SDValue FPOffset = DAG.getNode(ISD::SUB, DL, XLenVT, FPIntVal, SPIntVal);
-      OutChain = DAG.getStore(OutChain, DL, FPOffset, NextPtr, MachinePointerInfo());
-      NextPtr = DAG.getPointerAdd(DL, NextPtr, XLenVTSize); // advance pointer
-
-      // emit code portion of activation record and advance pointer
-      OutChain = emitActivationRecordCode(OutChain, DL, DAG, NextPtr);    
-    } else if (CHERIUninitReturnEncap == isentry) { // isentry specific stuff
-      // store full CFP instead of offset like trampoline
-      SDValue CFPReg = DAG.getRegister(RISCV::C8, PtrVT);
-      OutChain = DAG.getStore(OutChain, DL, CFPReg, NextPtr, MachinePointerInfo(200));
-    }
-  }
+  if (CHERIUninitReturnEncap == trampoline)
+    ActrecStores.append(emitActivationRecordCode(Chain, DL, DAG, NextPtr, ActrecCode));
 
   // Place bounds on the activation record capability
   ActrecPtr = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, DL, PtrVT, {
@@ -11598,6 +11577,7 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
     DAG.getTargetConstant(SealingOp, DL, XLenVT)
   , ActrecPtr
   });
+  SDValue OutChain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, ActrecStores);
   return std::make_tuple(OutChain, ActrecPtr, RAAddrSym);
 }
 
