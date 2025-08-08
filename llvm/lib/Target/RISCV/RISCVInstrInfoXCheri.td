@@ -336,6 +336,7 @@ def CGetSealed : Cheri_r<0x5, "cgetsealed">;
 def CGetOffset : Cheri_r<0x6, "cgetoffset">;
 def CGetFlags  : Cheri_r<0x7, "cgetflags">;
 def CGetHigh   : Cheri_r<0x17, "cgethigh">;
+def CGetTop    : Cheri_r<0x18, "cgettop">;
 // For backwards compatibility we still accept cgetaddr from assembly.
 let mayStore = false, mayLoad = false, Size = 4, isCodeGenOnly = false in
 def PseudoCGetAddr : Pseudo<(outs GPR:$rd), (ins GPCR:$cs1), [],
@@ -396,9 +397,8 @@ def CDropUninit : Cheri_r<0x1d, "cdropuninit", GPCR>;
 def CShrink     : Cheri_rr<0x22, "cshrink">;
 def CShrinkImm  : Cheri_ri<0x3, "cshrink", 0>;
 
-let hasSideEffects = 1, mayLoad = 0, mayStore = 0, hasCtrlDep = 1, Uses = [C2], Defs = [C2] in
-def PseudoCShrinkStack : Pseudo<(outs), (ins uimm12:$imm), [(riscv_cap_shrink_stack uimm12:$imm)]>,
-                         PseudoInstExpansion<(CShrinkImm C2, C2, uimm12:$imm)>;
+let hasSideEffects = 1, mayLoad = 0, mayStore = 0, hasCtrlDep = 1, Uses = [C2], Defs = [C2], usesCustomInserter = 1 in
+def PseudoCShrinkStack : Pseudo<(outs), (ins uimm12:$imm), [(riscv_cap_shrink_stack uimm12:$imm)]>;
 }
 
 def : InstAlias<"cincoffsetimm $cd, $cs1, $imm",
@@ -1161,11 +1161,29 @@ def riscv_clear_regs : SDNode<"RISCVISD::CLEAR_REGS", SDT_RISCVClearRegs,
 let Predicates = [HasCheri, IsCapMode], hasSideEffects = 1, Size = 16 in
 def PseudoCClear : Pseudo<(outs), (ins), [(riscv_clear_regs)]>;
 
-def SDT_RISCVUninitStackRealign : SDTypeProfile<0, 1, [SDTCisInt<0>]>;
-def riscv_uninit_realign_stack : SDNode<"RISCVISD::UNINIT_REALIGN_STACK", SDT_RISCVUninitStackRealign, [SDNPHasChain, SDNPMayStore]>;
+def SDT_RISCVUninitStoreStackArg : SDTypeProfile<0, 3, [SDTCisInt<1>, SDTCisInt<2>]>;
+def riscv_uninit_store_stack_arg : SDNode<"RISCVISD::UNINIT_STORE_STACK_ARG", SDT_RISCVUninitStoreStackArg, [SDNPHasChain, SDNPMayStore]>;
 
-let Predicates = [HasCheri, IsCapMode], hasSideEffects = 1, mayLoad = 0, mayStore = 1, usesCustomInserter = 1 in
-def PseudoUninitRealignStack : Pseudo<(outs), (ins uimm12:$align), [(riscv_uninit_realign_stack uimm12:$align)]>;
+let Predicates = [HasCheri, IsCapMode], hasSideEffects = 1, mayLoad = 0, mayStore = 1 in { 
+def PseudoUninitStoreStackArgIntB : Pseudo<(outs), (ins GPR:$arg), 
+                                           [(riscv_uninit_store_stack_arg GPR:$arg, (i64 1), (i64 0))]>,
+                                           PseudoInstExpansion<(USB_CAP C2, GPR:$arg, C2)>;
+def PseudoUninitStoreStackArgIntH : Pseudo<(outs), (ins GPR:$arg), 
+                                           [(riscv_uninit_store_stack_arg GPR:$arg, (i64 2), (i64 0))]>,
+                                           PseudoInstExpansion<(USH_CAP C2, GPR:$arg, C2)>;
+def PseudoUninitStoreStackArgIntW : Pseudo<(outs), (ins GPR:$arg), 
+                                           [(riscv_uninit_store_stack_arg GPR:$arg, (i64 4), (i64 0))]>,
+                                           PseudoInstExpansion<(USW_CAP C2, GPR:$arg, C2)>;
+def PseudoUninitStoreStackArgIntD : Pseudo<(outs), (ins GPR:$arg), 
+                                           [(riscv_uninit_store_stack_arg GPR:$arg, (i64 8), (i64 0))]>,
+                                           PseudoInstExpansion<(USD_CAP C2, GPR:$arg, C2)>;
+let usesCustomInserter = 1 in
+def PseudoUninitStoreStackArgIntWithPad : Pseudo<(outs), (ins GPR:$arg, uimm12:$size, uimm12:$pad), 
+  [(riscv_uninit_store_stack_arg GPR:$arg, uimm12:$size, uimm12:$pad)]>;
+def PseudoUninitStoreStackArgCap : Pseudo<(outs), (ins GPCR:$arg), 
+                                   [(riscv_uninit_store_stack_arg GPCR:$arg, (i64 16), (i64 0))]>,
+                                   PseudoInstExpansion<(USC_CAP C2, GPCR:$arg, C2)>;
+}
 
 let Predicates = [HasCheri, IsCapMode] in {
 let hasSideEffects = 0, mayLoad = 0, mayStore = 0, isCodeGenOnly = 0,

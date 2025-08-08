@@ -349,8 +349,8 @@ enum NodeType : unsigned {
   CAP_SHRINK_STACK,
   // Return with CInvokeLAL instead of cret
   RET_FLAG_INDIRECT,
-  // Realign stack for uninit call
-  UNINIT_REALIGN_STACK,
+  // Store a value to the uninit stack
+  UNINIT_STORE_STACK_ARG,
 
   // WARNING: Do not add anything in the end unless you want the node to
   // have memop! In fact, starting from FIRST_TARGET_MEMORY_OPCODE all

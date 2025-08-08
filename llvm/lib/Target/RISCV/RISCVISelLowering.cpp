@@ -13,6 +13,7 @@
 
 #include "RISCVISelLowering.h"
 #include "MCTargetDesc/RISCVCompressedCap.h"
+#include "MCTargetDesc/RISCVMCTargetDesc.h"
 #include "MCTargetDesc/RISCVMatInt.h"
 #include "RISCV.h"
 #include "RISCVMachineFunctionInfo.h"
@@ -22,13 +23,17 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/MemoryLocation.h"
+#include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineMemOperand.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
+#include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
@@ -45,6 +50,7 @@
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include <cstdint>
 #include "CHERIUninitTrampoline.h"
 
 using namespace llvm;
@@ -78,6 +84,11 @@ static cl::opt<CHERIUninitEncapOpts>
 static cl::opt<bool>
     CHERIUninitClearRegs("cheri-uninit-clear-regs",
     cl::desc("Clear registers upon call and return for uninit CC"),
+    cl::init(true));
+
+static cl::opt<bool>
+    CHERIUninitStackSplit("cheri-uninit-stack-split",
+    cl::desc("Split stack on caller-callee boundary upon call for uninit CC"),
     cl::init(true));
 
 static cl::opt<unsigned> CHERIUninitStackAlignment(
@@ -10736,6 +10747,74 @@ emitUninitRealignStack(MachineInstr &MI, MachineBasicBlock *BB,
   return LoopDoneMBB;
 }
 
+static unsigned int
+getUnsignedWriteOpcodeForSize(unsigned int Size)
+{
+  switch (Size) {
+    case 1:
+      return RISCV::USB_CAP;
+    case 2:
+      return RISCV::USH_CAP;
+    case 4:
+      return RISCV::USW_CAP;
+    case 8:
+      return RISCV::USD_CAP;
+    case 16:
+      return RISCV::USC_CAP;
+    default:
+      assert(false && "Unexpected size!");
+  }
+}
+
+static MachineBasicBlock *
+emitUninitStoreStackArgs(MachineInstr &MI, MachineBasicBlock *BB,
+                         const RISCVSubtarget &Subtarget) {
+  assert(false && "Implement this!");
+  // MachineBasicBlock &MBB = *BB;
+  // MachineBasicBlock::iterator MBBI = std::next(MachineBasicBlock::iterator(MI));
+  // DebugLoc DL = MI.getDebugLoc();
+  // const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+  // Register StackCapReg = RISCV::C2;
+
+  // unsigned int ArgC = MI.getOperand(0).getImm();
+  // int CurrOffset, NextOffset = 0;
+  // for (unsigned int ArgI = 1; ArgI < 2*ArgC; ArgI+=2) {
+  //   CurrOffset = MI.getOperand(ArgI+1).getImm();
+  //   NextOffset = MI.getOperand(ArgI+3).getImm();
+  //   BuildMI(MBB, MI, DL, 
+  //       TII->get(getUnsignedWriteOpcodeForSize(NextOffset - CurrOffset)), StackCapReg)
+  //     .addReg(MI.getOperand(ArgI).getReg())
+  //     .addReg(StackCapReg);
+  // }
+  // // Last argument we choose the store size (or emit zeros) so the arg block is 16-byte aligned
+  // MI.getOperand(2*ArgC + 1).getReg();
+  return BB;
+}
+
+static MachineBasicBlock *
+emitUninitShrinkStack(MachineInstr &MI, MachineBasicBlock *BB,
+                      const RISCVSubtarget &Subtarget) {
+  MachineBasicBlock &MBB = *BB;
+  MachineBasicBlock::iterator MBBI = std::next(MachineBasicBlock::iterator(MI));
+  MachineFunction &MF = *BB->getParent();
+  DebugLoc DL = MI.getDebugLoc();
+  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+  Register StackCapReg = RISCV::C2;
+  MachineRegisterInfo &RegInfo = MF.getRegInfo();
+  Register TempReg = RegInfo.createVirtualRegister(&RISCV::GPRRegClass);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CShrinkImm))
+      .addReg(StackCapReg).addReg(StackCapReg)
+      .addImm(MI.getOperand(0).getImm());
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CGetTop))
+      .addReg(TempReg)
+      .addReg(StackCapReg);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetAddr))
+      .addReg(StackCapReg).addReg(StackCapReg)
+      .addReg(TempReg);
+  MI.eraseFromParent();
+  return BB;
+}
+
 MachineBasicBlock *
 RISCVTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
                                                  MachineBasicBlock *BB) const {
@@ -10770,8 +10849,10 @@ RISCVTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     return emitQuietFCMP(MI, BB, RISCV::FLE_D, RISCV::FEQ_D, Subtarget);
   case RISCV::PseudoQuietFLT_D:
     return emitQuietFCMP(MI, BB, RISCV::FLT_D, RISCV::FEQ_D, Subtarget);
-  case RISCV::PseudoUninitRealignStack:
-    return emitUninitRealignStack(MI, BB, Subtarget);
+  case RISCV::PseudoCShrinkStack:
+    return emitUninitShrinkStack(MI, BB, Subtarget);
+  case RISCV::PseudoUninitStoreStackArgIntWithPad:
+    return emitUninitStoreStackArgs(MI, BB, Subtarget);
   }
 }
 
@@ -11985,15 +12066,10 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     }
   }
 
-  if (CallConv == CallingConv::CHERI_Uninit){
-    Chain = DAG.getNode(RISCVISD::UNINIT_REALIGN_STACK, DL,
-      MVT::Other,
-      {Chain, DAG.getConstant(CHERIUninitStackAlignment, DL, XLenVT)});
-  }
-
   // Copy argument values to their designated locations.
   SmallVector<std::pair<Register, SDValue>, 8> RegsToPass;
   SmallVector<SDValue, 8> MemOpChains;
+  std::map<uint64_t, std::tuple<SDValue,CCValAssign>> UninitStackArgs;
   SDValue StackPtr;
   for (unsigned i = 0, j = 0, e = ArgLocs.size(); i != e; ++i) {
     CCValAssign &VA = ArgLocs[i];
@@ -12103,12 +12179,18 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
             DAG.getCopyFromReg(Chain, DL,
                                getStackPointerRegisterToSaveRestore(),
                                PtrVT);
+
+      if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitStackSplit) {
+        // we emit custom stores for this later on
+        UninitStackArgs[VA.getLocMemOffset()] = {ArgValue,VA};
+      } else {
       SDValue Address =
           DAG.getPointerAdd(DL, StackPtr, VA.getLocMemOffset());
 
       // Emit the store.
       MemOpChains.push_back(
           DAG.getStore(Chain, DL, ArgValue, Address, MachinePointerInfo()));
+      }
     }
   }
 
@@ -12116,8 +12198,33 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   if (!MemOpChains.empty())
     Chain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, MemOpChains);
 
-  SDValue Glue;
+  // Emit stack cap shrinking node
+  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitStackSplit) {
+    Chain = DAG.getNode(RISCVISD::CAP_SHRINK_STACK, DL, MVT::Other, {
+      Chain
+    , DAG.getConstant(0, DL, XLenVT)
+    });
 
+    uint64_t PrevOffset = 0;
+    for (auto ArgIt = UninitStackArgs.rbegin(); 
+         ArgIt != UninitStackArgs.rend(); ArgIt++) {
+      auto [Arg,VA] = ArgIt->second;
+      uint64_t ArgOffset = ArgIt->first;
+      uint64_t ArgSize = VA.getLocVT().getStoreSize();
+      uint64_t ArgPad;
+      if (PrevOffset <= ArgIt->first) // first argument needs padding to align to 16 bytes
+        ArgPad = ((ArgOffset + ArgSize) % 16) ? 16 - ((ArgOffset + ArgSize) % 16) : 0;
+      else
+        ArgPad = PrevOffset - (ArgOffset + ArgSize);
+      PrevOffset = ArgOffset;
+      Chain = DAG.getNode(RISCVISD::UNINIT_STORE_STACK_ARG, DL, MVT::Other,
+                          Chain, Arg, 
+                          DAG.getConstant(ArgSize, DL, MVT::i64), 
+                          DAG.getConstant(ArgPad, DL, MVT::i64));
+    }
+  }
+
+  SDValue Glue;
   // Build a sequence of copy-to-reg nodes, chained and glued together.
   for (auto &Reg : RegsToPass) {
     Chain = DAG.getCopyToReg(Chain, DL, Reg.first, Reg.second, Glue);
@@ -12185,18 +12292,6 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     Chain = DAG.getCopyToReg(Chain, DL, RISCV::C1, ActrecPtr, Glue);
     Glue = Chain.getValue(1);
   }
-
-#ifdef CHERI_UNINIT_SHRINK
-  // Emit stack cap shrinking node
-  if (CallConv == CallingConv::CHERI_Uninit) {
-    Chain = DAG.getNode(RISCVISD::CAP_SHRINK_STACK, DL, {MVT::Other, MVT::Glue}, {
-      Chain
-    , DAG.getConstant(0, DL, XLenVT)
-    , Glue
-    });
-    Glue = Chain.getValue(1);
-  }
-#endif
 
   // Emit register clearing node
   if (CHERIUninitClearRegs && CallConv == CallingConv::CHERI_Uninit) {
@@ -12657,7 +12752,7 @@ const char *RISCVTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(CAP_SHRINK_STACK)
   NODE_NAME_CASE(UNINIT_CALL)
   NODE_NAME_CASE(RET_FLAG_INDIRECT)
-  NODE_NAME_CASE(UNINIT_REALIGN_STACK)
+  NODE_NAME_CASE(UNINIT_STORE_STACK_ARG)
   }
   // clang-format on
   return nullptr;

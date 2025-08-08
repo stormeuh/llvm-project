@@ -242,6 +242,14 @@ bool RISCVFrameLowering::hasFP(const MachineFunction &MF) const {
   const TargetRegisterInfo *RegInfo = MF.getSubtarget().getRegisterInfo();
 
   const MachineFrameInfo &MFI = MF.getFrameInfo();
+
+  // "Large" just means the frame needs to be more than 16-byte aligned for
+  // bounds to be representable on CHERI Concentrate. We disable FP in this
+  // case because FP bounds get set to only the stack frame.
+  bool IsLargeFrame = !isInt<14>(getStackSizeWithRVVPadding(MF));
+  if (STI.getTargetABI() == RISCVABI::ABI_L64PCU128 && IsLargeFrame)
+    return false;
+
   return MF.getTarget().Options.DisableFramePointerElim(MF) ||
          RegInfo->hasStackRealignment(MF) || MFI.hasVarSizedObjects() ||
          MFI.isFrameAddressTaken();
@@ -477,18 +485,18 @@ void RISCVFrameLowering::deriveFromUninitStackCap(
   // for some reason stack passed variables are not included in framesize
   for (auto ObjIdx = MFI.getObjectIndexBegin(); ObjIdx < MFI.getObjectIndexEnd(); ObjIdx++)
   {
-    if (MFI.getObjectOffset(ObjIdx) >= 0) {
+    if (!MFI.isDeadObjectIndex(ObjIdx) && MFI.getObjectOffset(ObjIdx) >= 0) {
       FrameSize += MFI.getObjectSize(ObjIdx);
     }
   }
   if (MFI.hasVAStart()) 
-    FrameSize += 1024; // add an error margin if va_start is called
+    FrameSize += 256; // add an error margin if va_start is called
   FrameSize = alignTo(FrameSize, StackAlign);
   MachineInstrBuilder CSetBoundsBuilder;
+  MachineInstrBuilder CIncOffsetBuilder;
   // If the framesize exceeds the maximum immediate size, emit a sequence of
   // instructions to build it.
-  if (FrameSize >= (1 << 11)) {
-    assert(Amount < (1 << 11) && "Larger objects are supposed to be allocated in a different way!");
+  if (!isInt<12>(FrameSize)) {
     TII->movImm(MBB, MBBI, DL, TempReg, FrameSize, Flag);
     CSetBoundsBuilder =
         BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetBounds), TargetReg)
@@ -501,11 +509,28 @@ void RISCVFrameLowering::deriveFromUninitStackCap(
             .addReg(StackCap)
             .addImm(FrameSize);
   }
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), TargetReg)
+  if (!isInt<12>(Amount)) {
+    assert(!isInt<12>(FrameSize) && "Something went wrong...");
+    int64_t FrameSizeAmountDiff = FrameSize - Amount;
+    assert(isInt<12>(FrameSizeAmountDiff) && "Expected to be able to build this value with immediate!");
+    if (FrameSizeAmountDiff) {
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), TempReg)
+        .addReg(TempReg)
+        .addImm(-FrameSizeAmountDiff)
+        .setMIFlag(Flag);
+    }
+    CIncOffsetBuilder = BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffset),
+        TargetReg)
+        .addReg(TargetReg)
+        .addReg(TempReg);
+  } else {
+    CIncOffsetBuilder = BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm),
+        TargetReg)
             .addReg(TargetReg)
-            .addImm(Amount)
-            .setMIFlag(Flag);
+            .addImm(Amount);
+  }
   CSetBoundsBuilder.setMIFlag(Flag);
+  CIncOffsetBuilder.setMIFlag(Flag);
 }
 
 void RISCVFrameLowering::setUninitStackCapAddress(
@@ -740,6 +765,10 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
     assert(SecondSPAdjustAmount > 0 &&
            "SecondSPAdjustAmount should be greater than zero");
     adjustReg(MBB, MBBI, DL, SPReg, SPReg, -SecondSPAdjustAmount,
+              MachineInstr::FrameSetup);
+      // emit second FP adjustment to ensure it has authority over entire stack frame
+      if (STI.getTargetABI() == RISCVABI::ABI_L64PCU128 && hasFP(MF))
+        adjustReg(MBB, MBBI, DL, FPReg, SPReg, getStackSizeWithRVVPadding(MF),
               MachineInstr::FrameSetup);
 
     // If we are using a frame-pointer, and thus emitted ".cfi_def_cfa fp, 0",
