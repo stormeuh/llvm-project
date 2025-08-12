@@ -10683,6 +10683,42 @@ static MachineBasicBlock *emitSelectPseudo(MachineInstr &MI,
 }
 
 static MachineBasicBlock *
+emitPseudoUCCALL(MachineInstr &MI, MachineBasicBlock *BB,
+                 const RISCVSubtarget &Subtarget) {
+  MachineBasicBlock &MBB = *BB;
+  MachineBasicBlock::iterator MBBI = std::next(MachineBasicBlock::iterator(MI));
+  MachineFunction &MF = *BB->getParent();
+  DebugLoc DL = MI.getDebugLoc();
+  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+
+  // Registers
+  Register StackCapReg = RISCV::C2;
+  Register FrameCapReg = RISCV::C8;
+  Register IDC = RISCV::C31;
+  MachineRegisterInfo &RegInfo = MF.getRegInfo();
+  Register TempReg = RegInfo.createVirtualRegister(&RISCV::GPCRTCRegClass);
+  
+  // Emit jump
+  MachineInstr *JumpInst = BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCJump))
+      .addReg(TempReg); // same temporary register as used for CTail
+  JumpInst->addOperand(MI.getOperand(0));
+  JumpInst->setPostInstrSymbol(MF, MI.getOperand(1).getMCSymbol());
+  
+  // Restore caller local state if isentry return encap is used
+  if (CHERIUninitReturnEncap == isentry) {
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), StackCapReg)
+      .addReg(IDC).addImm(16);
+    if (RISCVGenRegisterInfo::getFrameLowering(MF)->hasFP(MF))
+      BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), FrameCapReg)
+        .addReg(IDC).addImm(-16);
+  }
+
+  // remove expanded pseudo-instruction
+  MI.eraseFromParent();
+  return BB;
+}
+
+static MachineBasicBlock *
 emitUninitRealignStack(MachineInstr &MI, MachineBasicBlock *BB,
                        const RISCVSubtarget &Subtarget) {
   MachineFunction &MF = *BB->getParent();
@@ -10802,15 +10838,13 @@ emitUninitShrinkStack(MachineInstr &MI, MachineBasicBlock *BB,
   Register StackCapReg = RISCV::C2;
   MachineRegisterInfo &RegInfo = MF.getRegInfo();
   Register TempReg = RegInfo.createVirtualRegister(&RISCV::GPRRegClass);
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CShrinkImm))
-      .addReg(StackCapReg).addReg(StackCapReg)
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CShrinkImm), StackCapReg)
+      .addReg(StackCapReg)
       .addImm(MI.getOperand(0).getImm());
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CGetTop))
-      .addReg(TempReg)
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CGetTop), TempReg)
       .addReg(StackCapReg);
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetAddr))
-      .addReg(StackCapReg).addReg(StackCapReg)
-      .addReg(TempReg);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetAddr), StackCapReg)
+      .addReg(StackCapReg).addReg(TempReg);
   MI.eraseFromParent();
   return BB;
 }
@@ -10849,6 +10883,8 @@ RISCVTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     return emitQuietFCMP(MI, BB, RISCV::FLE_D, RISCV::FEQ_D, Subtarget);
   case RISCV::PseudoQuietFLT_D:
     return emitQuietFCMP(MI, BB, RISCV::FLT_D, RISCV::FEQ_D, Subtarget);
+  case RISCV::PseudoUCCALL:
+    return emitPseudoUCCALL(MI, BB, Subtarget);
   case RISCV::PseudoCShrinkStack:
     return emitUninitShrinkStack(MI, BB, Subtarget);
   case RISCV::PseudoUninitStoreStackArgIntWithPad:
@@ -11678,10 +11714,19 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
   unsigned ActrecSize = PtrVTSize * 2; // minimum size is stack cap and return cap
   if (CHERIUninitReturnEncap == trampoline) ActrecSize += ActrecCodeSize;
   if (HasFP) ActrecSize += PtrVTSize;
-  unsigned ActrecOffset = CHERIUninitReturnEncap == trampoline
-                        ? (ActrecSize - ActrecCodeSize)
-                        : 0;
-
+  unsigned ActrecOffset;
+  switch(CHERIUninitReturnEncap) {
+    case trampoline:
+      ActrecOffset = ActrecSize - ActrecCodeSize;
+      break;
+    case isentry:
+      ActrecOffset = HasFP ? PtrVTSize : 0;
+      break;
+    default:
+      assert(false && "Incorrect option for return encapsulation!");
+      break;
+  }
+  
   // create stack object and obtain pointer to it
   int FI = MF.getFrameInfo().CreateStackObject(ActrecSize, PtrVTAlign, /*isSS*/ false);
   SDValue ActrecPtr = DAG.getFrameIndex(FI, PtrVT);
@@ -12355,30 +12400,6 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
   DAG.addNoMergeSiteInfo(Chain.getNode(), CLI.NoMerge);
   Glue = Chain.getValue(1);
-
-  if (CallConv == CallingConv::CHERI_Uninit &&
-      CHERIUninitReturnEncap == isentry) {
-    // restore stack and frame capabilities from activation record
-    // load activation record pointer and calculate offsets
-    SDValue ActrecCap = DAG.getCopyFromReg(Chain, DL, RISCV::C31, PtrVT, Glue);
-    SDValue StackCapField = DAG.getPointerAdd(DL, ActrecCap, 16);
-    
-    // emit loads and moves to put into correct registers
-    // TODO make load put cap immediately into correct register
-    SDValue StackCap = DAG.getLoad(PtrVT, DL, ActrecCap.getValue(1),
-    StackCapField, MachinePointerInfo());
-    Chain = DAG.getCopyToReg(StackCap.getValue(1), DL, RISCV::C2, StackCap);
-    
-    if (hasFramePointer) {
-    SDValue FrameCapField = DAG.getPointerAdd(DL, ActrecCap, 32);
-    SDValue FrameCap =
-        DAG.getLoad(PtrVT, DL, Chain, FrameCapField, MachinePointerInfo());
-    Chain = DAG.getCopyToReg(Chain, DL, RISCV::C8, FrameCap, SDValue());
-    }
-
-    // glue to CALLSEQ_END node
-    Glue = Chain.getValue(1);
-  }
 
   // Mark the end of the call, which is glued to the call itself.
   Chain = DAG.getCALLSEQ_END(Chain,

@@ -1888,7 +1888,7 @@ def PseudoCCALLIndirect : Pseudo<(outs), (ins GPCR:$rs1),
                           PseudoInstExpansion<(CJALR C1, GPCR:$rs1, 0)>;
 
 let Predicates = [HasCheri, IsCapMode, IsPureCapABI] in {
-let isCall = 1, Uses = [C1] in
+let isCall = 1, Uses = [C1], usesCustomInserter = 1 in
 def PseudoUCCALL : Pseudo<(outs), (ins cap_call_symbol:$func, bare_symbol:$ra), []>;
 def : Pat<(riscv_uninit_call tglobaladdr:$func, XLenVT:$ra),
           (PseudoUCCALL tglobaladdr:$func, bare_symbol:$ra)>;

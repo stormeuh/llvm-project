@@ -86,9 +86,6 @@ private:
   bool expandPseudoCClear(MachineBasicBlock &MBB,
                           MachineBasicBlock::iterator MBBI,
                           MachineBasicBlock::iterator &NextMBBI);
-  bool expandPseudoUCCALL(MachineBasicBlock &block,
-                          MachineBasicBlock::iterator iterator,
-                          MachineBasicBlock::iterator &iterator1);
 };
 
 char RISCVExpandPseudo::ID = 0;
@@ -123,8 +120,6 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
   switch (MBBI->getOpcode()) {
   case RISCV::PseudoCClear:
     return expandPseudoCClear(MBB, MBBI, NextMBBI);
-  case RISCV::PseudoUCCALL:
-    return expandPseudoUCCALL(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLLA:
     return expandLoadLocalAddress(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLA:
@@ -561,26 +556,6 @@ bool RISCVExpandPseudo::expandVRELOAD(MachineBasicBlock &MBB,
           .addReg(VL);
   }
   MBBI->eraseFromParent();
-  return true;
-}
-
-bool RISCVExpandPseudo::expandPseudoUCCALL(
-    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
-    MachineBasicBlock::iterator &NextMBBI) {
-  MachineInstr &MI = *MBBI;
-  MachineFunction *MF = MBB.getParent();
-  DebugLoc DL = MI.getDebugLoc();
-  // seal and install activation record as return address
-  // BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSealEntry))
-  //     .addReg(RISCV::C1)
-  //     .addReg(RISCV::C1);
-  // jump to
-  MachineInstr *JumpInst = BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCJump))
-      .addReg(RISCV::C6); // same temporary register as used for CTail
-  JumpInst->addOperand(MI.getOperand(0));
-  JumpInst->setPostInstrSymbol(*MF, MI.getOperand(1).getMCSymbol());
-  // remove expanded pseudo-instruction
-  MI.eraseFromParent();
   return true;
 }
 
