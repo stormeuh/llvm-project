@@ -10699,10 +10699,12 @@ emitPseudoUCCALL(MachineInstr &MI, MachineBasicBlock *BB,
   Register TempReg = RegInfo.createVirtualRegister(&RISCV::GPCRTCRegClass);
   
   // Emit jump
-  MachineInstr *JumpInst = BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCJump))
-      .addReg(TempReg); // same temporary register as used for CTail
+  MachineInstr *JumpInst = BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCCALLCustomRA), TempReg);
   JumpInst->addOperand(MI.getOperand(0));
   JumpInst->setPostInstrSymbol(MF, MI.getOperand(1).getMCSymbol());
+  // add all other operands
+  for (auto OpIdx = 2u; OpIdx < MI.getNumOperands(); OpIdx++)
+    JumpInst->addOperand(MI.getOperand(OpIdx));
   
   // Restore caller local state if isentry return encap is used
   if (CHERIUninitReturnEncap == isentry) {

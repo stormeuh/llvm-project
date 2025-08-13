@@ -1928,6 +1928,14 @@ def : Pat<(riscv_cap_tail texternalsym:$dst),
 } // Predicates = [HasCheri, IsCapMode, IsPureCapABI]
 
 let Predicates = [HasCheri, IsCapMode, IsPureCapABI] in
+let isCall = 1, isCodeGenOnly = 0, Size = 8, hasSideEffects = 0, 
+    mayStore = 0, mayLoad = 0 in
+def PseudoCCALLCustomRA : Pseudo<(outs GPCR:$rd),
+                         (ins pseudo_cap_jump_symbol:$target), []> {
+  let AsmString = "cjump\t$target, $rd";
+}
+
+let Predicates = [HasCheri, IsCapMode, IsPureCapABI] in
 let isCall = 0, isBarrier = 1, isBranch = 1, isTerminator = 1, Size = 8,
     isCodeGenOnly = 0, hasSideEffects = 0, mayStore = 0, mayLoad = 0 in
 def PseudoCJump : Pseudo<(outs GPCR:$rd),

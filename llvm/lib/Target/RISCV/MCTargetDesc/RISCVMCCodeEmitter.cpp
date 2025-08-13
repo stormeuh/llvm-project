@@ -143,6 +143,10 @@ void RISCVMCCodeEmitter::expandFunctionCall(const MCInst &MI, raw_ostream &OS,
     Func = MI.getOperand(1);
     Ra = MI.getOperand(0).getReg();
     IsCap = true;
+  } else if (MI.getOpcode() == RISCV::PseudoCCALLCustomRA) {
+    Func = MI.getOperand(1);
+    Ra = MI.getOperand(0).getReg();
+    IsCap = true;
   }
   uint32_t Binary;
 
@@ -160,7 +164,8 @@ void RISCVMCCodeEmitter::expandFunctionCall(const MCInst &MI, raw_ostream &OS,
   if (MI.getOpcode() == RISCV::PseudoTAIL ||
       MI.getOpcode() == RISCV::PseudoJump ||
       MI.getOpcode() == RISCV::PseudoCTAIL ||
-      MI.getOpcode() == RISCV::PseudoCJump)
+      MI.getOpcode() == RISCV::PseudoCJump ||
+      MI.getOpcode() == RISCV::PseudoCCALLCustomRA)
     // Emit [C]JALR [XC]0, Ra, 0
     TmpInst = MCInstBuilder(IsCap ? RISCV::CJALR : RISCV::JALR)
                   .addReg(IsCap ? RISCV::C0 : RISCV::X0)
@@ -270,7 +275,8 @@ void RISCVMCCodeEmitter::encodeInstruction(const MCInst &MI, raw_ostream &OS,
       MI.getOpcode() == RISCV::PseudoCCALLReg ||
       MI.getOpcode() == RISCV::PseudoCCALL ||
       MI.getOpcode() == RISCV::PseudoCTAIL ||
-      MI.getOpcode() == RISCV::PseudoCJump) {
+      MI.getOpcode() == RISCV::PseudoCJump || 
+      MI.getOpcode() == RISCV::PseudoCCALLCustomRA) {
     expandFunctionCall(MI, OS, Fixups, STI);
     MCNumEmitted += 2;
     return;
