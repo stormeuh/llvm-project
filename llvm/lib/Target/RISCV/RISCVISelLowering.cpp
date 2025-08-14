@@ -10692,28 +10692,36 @@ emitPseudoUCCALL(MachineInstr &MI, MachineBasicBlock *BB,
   const TargetInstrInfo *TII = Subtarget.getInstrInfo();
 
   // Registers
-  Register StackCapReg = RISCV::C2;
-  Register FrameCapReg = RISCV::C8;
-  Register IDC = RISCV::C31;
-  MachineRegisterInfo &RegInfo = MF.getRegInfo();
-  Register TempReg = RegInfo.createVirtualRegister(&RISCV::GPCRTCRegClass);
-  
-  // Emit jump
-  MachineInstr *JumpInst = BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCCALLCustomRA), TempReg);
+  // Register StackCapReg = RISCV::C2;
+  // Register FrameCapReg = RISCV::C8;
+  // Register IDC = RISCV::C31;
+
+  int CallOpc; 
+  if (CHERIUninitReturnEncap == isentry)
+    if (RISCVGenRegisterInfo::getFrameLowering(MF)->hasFP(MF))
+      CallOpc = RISCV::PseudoCCALLIndirectSentryFP;
+    else 
+      CallOpc = RISCV::PseudoCCALLIndirectSentry;
+  else 
+    CallOpc = RISCV::PseudoCCALLCustomRA;
+
+  // Emit jump, supply register for auipcc, same as used by ccall
+  MachineInstr *JumpInst = BuildMI(MBB, MBBI, DL, 
+    TII->get(CallOpc), RISCV::C6);
   JumpInst->addOperand(MI.getOperand(0));
   JumpInst->setPostInstrSymbol(MF, MI.getOperand(1).getMCSymbol());
   // add all other operands
   for (auto OpIdx = 2u; OpIdx < MI.getNumOperands(); OpIdx++)
     JumpInst->addOperand(MI.getOperand(OpIdx));
-  
+
   // Restore caller local state if isentry return encap is used
-  if (CHERIUninitReturnEncap == isentry) {
-    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), StackCapReg)
-      .addReg(IDC).addImm(16);
-    if (RISCVGenRegisterInfo::getFrameLowering(MF)->hasFP(MF))
-      BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), FrameCapReg)
-        .addReg(IDC).addImm(-16);
-  }
+  // if (CHERIUninitReturnEncap == isentry) {
+  //   BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), StackCapReg)
+  //     .addReg(IDC).addImm(16);
+  //   if (RISCVGenRegisterInfo::getFrameLowering(MF)->hasFP(MF))
+  //     BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), FrameCapReg)
+  //       .addReg(IDC).addImm(-16);
+  // }
 
   // remove expanded pseudo-instruction
   MI.eraseFromParent();

@@ -12,12 +12,14 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "MCTargetDesc/RISCVMCTargetDesc.h"
 #include "RISCV.h"
 #include "RISCVInstrInfo.h"
 #include "RISCVTargetMachine.h"
 
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/MC/MCContext.h"
 
@@ -86,6 +88,9 @@ private:
   bool expandPseudoCClear(MachineBasicBlock &MBB,
                           MachineBasicBlock::iterator MBBI,
                           MachineBasicBlock::iterator &NextMBBI);
+  bool expandPseudoCCALLIndirectSentry(MachineBasicBlock &MBB,
+                          MachineBasicBlock::iterator MBBI,
+                          MachineBasicBlock::iterator &NextMBBI, bool HasFP);
 };
 
 char RISCVExpandPseudo::ID = 0;
@@ -118,6 +123,10 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
   // expanded instructions for each pseudo is correct in the Size field of the
   // tablegen definition for the pseudo.
   switch (MBBI->getOpcode()) {
+  case RISCV::PseudoCCALLIndirectSentryFP:
+    return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, true);
+  case RISCV::PseudoCCALLIndirectSentry:
+    return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, false);
   case RISCV::PseudoCClear:
     return expandPseudoCClear(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLLA:
@@ -556,6 +565,39 @@ bool RISCVExpandPseudo::expandVRELOAD(MachineBasicBlock &MBB,
           .addReg(VL);
   }
   MBBI->eraseFromParent();
+  return true;
+}
+
+bool RISCVExpandPseudo::expandPseudoCCALLIndirectSentry(MachineBasicBlock &MBB,
+                          MachineBasicBlock::iterator MBBI,
+                          MachineBasicBlock::iterator &NextMBBI, bool HasFP) {
+  MachineFunction *MF = MBB.getParent();
+  MachineInstr &MI = *MBBI;
+  DebugLoc DL = MBBI->getDebugLoc();
+  const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+  
+  // Registers
+  Register StackCapReg = RISCV::C2;
+  Register FrameCapReg = RISCV::C8;
+  Register IDC = RISCV::C31;
+
+  // Replace PseudoCCALLIndirectSentry with PseudoCCALLCustomRA, keep everything else
+  MachineInstr *JumpInst = BuildMI(MBB, MBBI, DL, 
+    TII->get(RISCV::PseudoCCALLCustomRA), MI.getOperand(0).getReg());
+  JumpInst->addOperand(MI.getOperand(1));
+  JumpInst->setPostInstrSymbol(*MF, MI.getPostInstrSymbol());
+  // add all other operands
+  for (auto OpIdx = 2u; OpIdx < MI.getNumOperands(); OpIdx++)
+    JumpInst->addOperand(MI.getOperand(OpIdx));
+
+  // now emit instructions to restore cfp and csp
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), StackCapReg)
+    .addReg(IDC).addImm(16);
+  if (HasFP)
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), FrameCapReg)
+      .addReg(IDC).addImm(-16);
+
+  MI.eraseFromParent();
   return true;
 }
 
