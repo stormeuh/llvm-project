@@ -1158,8 +1158,15 @@ def SDT_RISCVClearRegs : SDTypeProfile<0, 0, []>;
 def riscv_clear_regs : SDNode<"RISCVISD::CLEAR_REGS", SDT_RISCVClearRegs,
 [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue, SDNPVariadic]>;
 
-let Predicates = [HasCheri, IsCapMode], hasSideEffects = 1, Size = 16 in
-def PseudoCClear : Pseudo<(outs), (ins), [(riscv_clear_regs)]>;
+let Predicates = [HasCheri, IsCapMode], hasSideEffects = 1 in {
+let usesCustomInserter = 1 in
+def PseudoClearRegs : Pseudo<(outs), (ins), [(riscv_clear_regs)]>;
+
+let mayLoad = 0, mayStore = 0 in
+def PseudoCClear : Pseudo<(outs), (ins uimm2:$quad, uimm8:$mask), []>,
+  PseudoInstExpansion<(CClear uimm2:$quad, uimm8:$mask)>;
+}
+
 
 def SDT_RISCVUninitStoreStackArg : SDTypeProfile<0, 3, [SDTCisInt<1>, SDTCisInt<2>]>;
 def riscv_uninit_store_stack_arg : SDNode<"RISCVISD::UNINIT_STORE_STACK_ARG", SDT_RISCVUninitStoreStackArg, [SDNPHasChain, SDNPMayStore]>;

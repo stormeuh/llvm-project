@@ -127,8 +127,8 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
     return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, true);
   case RISCV::PseudoCCALLIndirectSentry:
     return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, false);
-  case RISCV::PseudoCClear:
-    return expandPseudoCClear(MBB, MBBI, NextMBBI);
+  // case RISCV::PseudoCClear:
+  //   return expandPseudoCClear(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLLA:
     return expandLoadLocalAddress(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLA:

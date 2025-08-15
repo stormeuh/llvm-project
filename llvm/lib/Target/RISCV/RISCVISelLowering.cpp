@@ -35,8 +35,10 @@
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/Register.h"
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/ValueTypes.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
@@ -10683,6 +10685,54 @@ static MachineBasicBlock *emitSelectPseudo(MachineInstr &MI,
 }
 
 static MachineBasicBlock *
+emitPseudoClearRegs(MachineInstr &MI, MachineBasicBlock *BB,
+                    const RISCVSubtarget &Subtarget) {
+  // base mask is used to specify registers which may never be cleared
+  // set DDC not to be cleared by default
+  static const uint32_t CapBaseMask = 0xfffffffe;
+  MachineBasicBlock &MBB = *BB;
+  MachineBasicBlock::iterator MBBI = std::next(MachineBasicBlock::iterator(MI));
+  DebugLoc DL = MI.getDebugLoc();
+  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+  const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
+
+  // retrieve register mask operand from pseudo
+  const uint32_t *RegMask = MI.getOperand(0).getRegMask();
+  // The register mask is indexed by the RISCV register enum, which causes the
+  // capability register mask to be
+  uint32_t CapPreserveMask = 0;
+  static_assert(sizeof(CapPreserveMask) == sizeof(*RegMask), "");
+  const uint32_t MaskWidth = sizeof(CapPreserveMask) * 8;
+
+  const auto C0WordIdx = RISCV::C0 / MaskWidth;
+  const auto C0WordOff = RISCV::C0 % MaskWidth;
+  CapPreserveMask = // set bits from lower register mask word
+      CapPreserveMask | (RegMask[C0WordIdx] >> C0WordOff);
+  CapPreserveMask = // set bits from higher register mask word
+      CapPreserveMask | (RegMask[C0WordIdx+1] << (MaskWidth - C0WordOff));
+
+  // negate preserve mask,
+  uint32_t CapClearMask = CapBaseMask & ~CapPreserveMask;
+
+  MachineInstrBuilder CClearBuilder;
+  Register CurrentReg;
+  for (int I = 0; I < 4; I++){
+    uint8_t CapMaskSegment = (CapClearMask >> (I * 8));
+    CClearBuilder = BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCClear))
+        .addImm(I)
+        .addImm(CapMaskSegment);
+    for (int RegIdx = 0; RegIdx < 8; RegIdx++) {
+      if (CapMaskSegment & (1 << RegIdx)) {
+        CurrentReg = RISCV::C0 + I*8 + RegIdx;
+        CClearBuilder->addRegisterDefined(CurrentReg, TRI);
+      }
+    }
+  }
+  MI.eraseFromParent();
+  return BB;
+}
+
+static MachineBasicBlock *
 emitPseudoUCCALL(MachineInstr &MI, MachineBasicBlock *BB,
                  const RISCVSubtarget &Subtarget) {
   MachineBasicBlock &MBB = *BB;
@@ -10893,6 +10943,8 @@ RISCVTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     return emitQuietFCMP(MI, BB, RISCV::FLE_D, RISCV::FEQ_D, Subtarget);
   case RISCV::PseudoQuietFLT_D:
     return emitQuietFCMP(MI, BB, RISCV::FLT_D, RISCV::FEQ_D, Subtarget);
+  case RISCV::PseudoClearRegs:
+    return emitPseudoClearRegs(MI, BB, Subtarget);
   case RISCV::PseudoUCCALL:
     return emitPseudoUCCALL(MI, BB, Subtarget);
   case RISCV::PseudoCShrinkStack:
