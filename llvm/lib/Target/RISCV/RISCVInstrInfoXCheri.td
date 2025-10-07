@@ -1154,13 +1154,13 @@ def : InstAlias<"c.cincoffsetimm16csp $rd, $imm",
 //===----------------------------------------------------------------------===//
 
 
-def SDT_RISCVClearRegs : SDTypeProfile<0, 0, []>;
+def SDT_RISCVClearRegs : SDTypeProfile<0, 1, []>;
 def riscv_clear_regs : SDNode<"RISCVISD::CLEAR_REGS", SDT_RISCVClearRegs,
-[SDNPHasChain, SDNPOptInGlue, SDNPOutGlue, SDNPVariadic]>;
+[SDNPHasChain, SDNPOptInGlue, SDNPOutGlue]>;
 
 let Predicates = [HasCheri, IsCapMode], hasSideEffects = 1 in {
 let usesCustomInserter = 1 in
-def PseudoClearRegs : Pseudo<(outs), (ins), [(riscv_clear_regs)]>;
+def PseudoClearRegs : Pseudo<(outs), (ins uimm32:$mask), [(riscv_clear_regs uimm32:$mask)]>;
 
 let mayLoad = 0, mayStore = 0 in
 def PseudoCClear : Pseudo<(outs), (ins uimm2:$quad, uimm8:$mask), []>,
@@ -1169,7 +1169,7 @@ def PseudoCClear : Pseudo<(outs), (ins uimm2:$quad, uimm8:$mask), []>,
 
 
 def SDT_RISCVUninitStoreStackArg : SDTypeProfile<0, 3, [SDTCisInt<1>, SDTCisInt<2>]>;
-def riscv_uninit_store_stack_arg : SDNode<"RISCVISD::UNINIT_STORE_STACK_ARG", SDT_RISCVUninitStoreStackArg, [SDNPHasChain, SDNPMayStore]>;
+def riscv_uninit_store_stack_arg : SDNode<"RISCVISD::UNINIT_STORE_STACK_ARG", SDT_RISCVUninitStoreStackArg, [SDNPHasChain, SDNPMayStore, SDNPOptInGlue, SDNPOutGlue]>;
 
 let Predicates = [HasCheri, IsCapMode], hasSideEffects = 1, mayLoad = 0, mayStore = 1 in { 
 def PseudoUninitStoreStackArgIntB : Pseudo<(outs), (ins GPR:$arg), 

@@ -21,6 +21,7 @@
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineInstrBundle.h"
 #include "llvm/MC/MCContext.h"
 
 using namespace llvm;
@@ -85,9 +86,9 @@ private:
                          MachineBasicBlock::iterator MBBI, unsigned Opcode);
   bool expandVSPILL(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI);
   bool expandVRELOAD(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI);
-  bool expandPseudoCClear(MachineBasicBlock &MBB,
-                          MachineBasicBlock::iterator MBBI,
-                          MachineBasicBlock::iterator &NextMBBI);
+  bool expandPseudoClearRegs(MachineBasicBlock &MBB,
+                             MachineBasicBlock::iterator MBBI,
+                             MachineBasicBlock::iterator &NextMBBI);
   bool expandPseudoCCALLIndirectSentry(MachineBasicBlock &MBB,
                           MachineBasicBlock::iterator MBBI,
                           MachineBasicBlock::iterator &NextMBBI, bool HasFP);
@@ -127,8 +128,8 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
     return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, true);
   case RISCV::PseudoCCALLIndirectSentry:
     return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, false);
-  // case RISCV::PseudoCClear:
-  //   return expandPseudoCClear(MBB, MBBI, NextMBBI);
+  case RISCV::PseudoClearRegs:
+    return expandPseudoClearRegs(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLLA:
     return expandLoadLocalAddress(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLA:
@@ -200,49 +201,49 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
 
 // base mask is used to specify registers which may never be cleared
 // set DDC not to be cleared by default
-static const uint32_t CapBaseMask = 0xfffffffe;
+// static const uint32_t CapBaseMask = 0xfffffffe;
 
-bool RISCVExpandPseudo::expandPseudoCClear(
-    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
-    MachineBasicBlock::iterator &NextMBBI
-    ) {
-//  MachineFunction *MF = MBB.getParent();
-  MachineInstr &MI = *MBBI;
-  DebugLoc DL = MI.getDebugLoc();
+// bool RISCVExpandPseudo::expandPseudoCClear(
+//     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+//     MachineBasicBlock::iterator &NextMBBI
+//     ) {
+// //  MachineFunction *MF = MBB.getParent();
+//   MachineInstr &MI = *MBBI;
+//   DebugLoc DL = MI.getDebugLoc();
 
-  // retrieve register mask operand from pseudo
-  const uint32_t *RegMask = MI.getOperand(0).getRegMask();
-  // The register mask is indexed by the RISCV register enum, which causes the
-  // capability register mask to be
-//  const uint32_t FloatBaseMask = 0xffffffff;
-  uint32_t CapPreserveMask = 0;
-//  uint32_t FloatClearMask = 0;
-  static_assert(sizeof(CapPreserveMask) == sizeof(*RegMask), "");
-  const uint32_t MaskWidth = sizeof(CapPreserveMask) * 8;
+//   // retrieve register mask operand from pseudo
+//   const uint32_t *RegMask = MI.getOperand(0).getRegMask();
+//   // The register mask is indexed by the RISCV register enum, which causes the
+//   // capability register mask to be
+// //  const uint32_t FloatBaseMask = 0xffffffff;
+//   uint32_t CapPreserveMask = 0;
+// //  uint32_t FloatClearMask = 0;
+//   static_assert(sizeof(CapPreserveMask) == sizeof(*RegMask), "");
+//   const uint32_t MaskWidth = sizeof(CapPreserveMask) * 8;
 
-  const auto C0WordIdx = RISCV::C0 / MaskWidth;
-  const auto C0WordOff = RISCV::C0 % MaskWidth;
-  CapPreserveMask = // set bits from lower register mask word
-      CapPreserveMask | (RegMask[C0WordIdx] >> C0WordOff);
-  CapPreserveMask = // set bits from higher register mask word
-      CapPreserveMask | (RegMask[C0WordIdx+1] << (MaskWidth - C0WordOff));
+//   const auto C0WordIdx = RISCV::C0 / MaskWidth;
+//   const auto C0WordOff = RISCV::C0 % MaskWidth;
+//   CapPreserveMask = // set bits from lower register mask word
+//       CapPreserveMask | (RegMask[C0WordIdx] >> C0WordOff);
+//   CapPreserveMask = // set bits from higher register mask word
+//       CapPreserveMask | (RegMask[C0WordIdx+1] << (MaskWidth - C0WordOff));
 
-  // negate preserve mask,
-  uint32_t CapClearMask = CapBaseMask & ~CapPreserveMask;
+//   // negate preserve mask,
+//   uint32_t CapClearMask = CapBaseMask & ~CapPreserveMask;
 
-  for (int I = 0; I < 4; I++){
-    uint8_t CapMaskSegment = (CapClearMask >> (I * 8));
-//    uint8_t FPRegMaskSegment = (RegMask >> (i * 8));
-    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CClear))
-        .addImm(I)
-        .addImm(CapMaskSegment);
-//    BuildMI(NewMBB, DL, TII->get(RISCV::FPClear))
-//        .addImm(i)
-//        .addImm(FPRegMaskSegment);
-  }
-  MI.eraseFromParent();
-  return true;
-}
+//   for (int I = 0; I < 4; I++){
+//     uint8_t CapMaskSegment = (CapClearMask >> (I * 8));
+// //    uint8_t FPRegMaskSegment = (RegMask >> (i * 8));
+//     BuildMI(MBB, MBBI, DL, TII->get(RISCV::CClear))
+//         .addImm(I)
+//         .addImm(CapMaskSegment);
+// //    BuildMI(NewMBB, DL, TII->get(RISCV::FPClear))
+// //        .addImm(i)
+// //        .addImm(FPRegMaskSegment);
+//   }
+//   MI.eraseFromParent();
+//   return true;
+// }
 
 bool RISCVExpandPseudo::expandAuipcInstPair(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
@@ -597,6 +598,35 @@ bool RISCVExpandPseudo::expandPseudoCCALLIndirectSentry(MachineBasicBlock &MBB,
     BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), FrameCapReg)
       .addReg(IDC).addImm(-16);
 
+  MI.eraseFromParent();
+  return true;
+}
+
+bool RISCVExpandPseudo::expandPseudoClearRegs(MachineBasicBlock &MBB,
+                                              MachineBasicBlock::iterator MBBI,
+                                              MachineBasicBlock::iterator &NextMBBI) {
+  MachineFunction *MF = MBB.getParent();
+  MachineInstr &MI = *MBBI;
+  DebugLoc DL = MBBI->getDebugLoc();
+  const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+  const TargetRegisterInfo *TRI = MF->getSubtarget().getRegisterInfo();
+
+  const uint32_t CapClearMask = MI.getOperand(0).getImm();
+
+  MachineInstrBuilder CClearBuilder;
+  Register CurrentReg;
+  for (int I = 0; I < 4; I++){
+    uint8_t CapMaskSegment = (CapClearMask >> (I * 8));
+    CClearBuilder = BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCClear))
+        .addImm(I)
+        .addImm(CapMaskSegment);
+    for (int RegIdx = 0; RegIdx < 8; RegIdx++) {
+      if (CapMaskSegment & (1 << RegIdx)) {
+        CurrentReg = RISCV::C0 + I*8 + RegIdx;
+        CClearBuilder->addRegisterDefined(CurrentReg, TRI);
+      }
+    }
+  }
   MI.eraseFromParent();
   return true;
 }

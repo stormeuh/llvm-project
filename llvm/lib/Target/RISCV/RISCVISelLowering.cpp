@@ -10685,50 +10685,43 @@ static MachineBasicBlock *emitSelectPseudo(MachineInstr &MI,
 }
 
 static MachineBasicBlock *
-emitPseudoClearRegs(MachineInstr &MI, MachineBasicBlock *BB,
+transformPseudoClearRegs(MachineInstr &MI, MachineBasicBlock *BB,
                     const RISCVSubtarget &Subtarget) {
   // base mask is used to specify registers which may never be cleared
   // set DDC not to be cleared by default
-  static const uint32_t CapBaseMask = 0xfffffffe;
-  MachineBasicBlock &MBB = *BB;
-  MachineBasicBlock::iterator MBBI = std::next(MachineBasicBlock::iterator(MI));
+  // static const uint32_t CapBaseMask = 0xfffffffe;
+  MachineInstrBuilder MIB = MachineInstrBuilder(*BB->getParent(), &MI);
   DebugLoc DL = MI.getDebugLoc();
-  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
   const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
 
-  // retrieve register mask operand from pseudo
-  const uint32_t *RegMask = MI.getOperand(0).getRegMask();
-  // The register mask is indexed by the RISCV register enum, which causes the
-  // capability register mask to be
-  uint32_t CapPreserveMask = 0;
-  static_assert(sizeof(CapPreserveMask) == sizeof(*RegMask), "");
-  const uint32_t MaskWidth = sizeof(CapPreserveMask) * 8;
+  // // retrieve register mask operand from pseudo, remove implicit defs
+  // const uint32_t *RegMask = MI.getOperand(0).getRegMask();
 
-  const auto C0WordIdx = RISCV::C0 / MaskWidth;
-  const auto C0WordOff = RISCV::C0 % MaskWidth;
-  CapPreserveMask = // set bits from lower register mask word
-      CapPreserveMask | (RegMask[C0WordIdx] >> C0WordOff);
-  CapPreserveMask = // set bits from higher register mask word
-      CapPreserveMask | (RegMask[C0WordIdx+1] << (MaskWidth - C0WordOff));
+  // // The register mask is indexed by the RISCV register enum, which causes the
+  // // capability register mask to be
+  // uint32_t CapPreserveMask = 0;
+  // static_assert(sizeof(CapPreserveMask) == sizeof(*RegMask), "");
+  // const uint32_t MaskWidth = sizeof(CapPreserveMask) * 8;
 
-  // negate preserve mask,
-  uint32_t CapClearMask = CapBaseMask & ~CapPreserveMask;
+  // const auto C0WordIdx = RISCV::C0 / MaskWidth;
+  // const auto C0WordOff = RISCV::C0 % MaskWidth;
+  // CapPreserveMask = // set bits from lower register mask word
+  //     CapPreserveMask | (RegMask[C0WordIdx] >> C0WordOff);
+  // CapPreserveMask = // set bits from higher register mask word
+  //     CapPreserveMask | (RegMask[C0WordIdx+1] << (MaskWidth - C0WordOff));
 
-  MachineInstrBuilder CClearBuilder;
+  // // negate preserve mask,
+  // uint32_t CapClearMask = CapBaseMask & ~CapPreserveMask;
+  
+  // add mask as immediate to MI, and add implicit defs for RA
+  uint32_t CapClearMask = MI.getOperand(0).getImm();
   Register CurrentReg;
-  for (int I = 0; I < 4; I++){
-    uint8_t CapMaskSegment = (CapClearMask >> (I * 8));
-    CClearBuilder = BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCClear))
-        .addImm(I)
-        .addImm(CapMaskSegment);
-    for (int RegIdx = 0; RegIdx < 8; RegIdx++) {
-      if (CapMaskSegment & (1 << RegIdx)) {
-        CurrentReg = RISCV::C0 + I*8 + RegIdx;
-        CClearBuilder->addRegisterDefined(CurrentReg, TRI);
-      }
+  for (int RegIdx = 1; RegIdx < 32; RegIdx++) {
+    if (CapClearMask & (1 << RegIdx)) {
+      CurrentReg = RISCV::C0 + RegIdx;
+      MIB->addRegisterDefined(CurrentReg, TRI);
     }
   }
-  MI.eraseFromParent();
   return BB;
 }
 
@@ -10779,90 +10772,6 @@ emitPseudoUCCALL(MachineInstr &MI, MachineBasicBlock *BB,
 }
 
 static MachineBasicBlock *
-emitUninitRealignStack(MachineInstr &MI, MachineBasicBlock *BB,
-                       const RISCVSubtarget &Subtarget) {
-  MachineFunction &MF = *BB->getParent();
-  const BasicBlock *LLVM_BB = BB->getBasicBlock();
-  DebugLoc DL = MI.getDebugLoc();
-  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
-
-  // assume register is stackreg
-  Register StackCapReg = RISCV::C2;
-  Register StackIntReg = RISCV::X2;
-
-  // create exit MBB
-  MachineBasicBlock *LoopDoneMBB = MF.CreateMachineBasicBlock(LLVM_BB);
-  MF.insert(++BB->getIterator(), LoopDoneMBB);
-  // Move rest of instructions to loop exit MBB
-  LoopDoneMBB->splice(LoopDoneMBB->end(), BB, MI, BB->end());
-  // Update machine-CFG edges
-  LoopDoneMBB->transferSuccessorsAndUpdatePHIs(BB);
-
-  // get argument
-  unsigned P2Align = MI.getOperand(0).getImm();
-  MI.eraseFromParent();
-
-  // setup: create shift amount
-  MachineRegisterInfo &RegInfo = MF.getRegInfo();
-  Register TempReg = RegInfo.createVirtualRegister(&RISCV::GPRRegClass);
-  // Register TempReg = RISCV::X31;
-  BuildMI(BB, DL, TII->get(RISCV::SRLI), TempReg)
-      .addReg(StackIntReg)
-      .addImm(P2Align);
-  Register AlignTarget = RegInfo.createVirtualRegister(&RISCV::GPRRegClass);
-  BuildMI(BB, DL, TII->get(RISCV::SLLI), AlignTarget)
-      .addReg(TempReg)
-      .addImm(P2Align);
-
-  // create loop condition MBB
-  MachineBasicBlock *LoopCondMBB = MF.CreateMachineBasicBlock(LLVM_BB);
-  MF.insert(++BB->getIterator(), LoopCondMBB);
-  BB->addSuccessor(LoopCondMBB);
-  LoopCondMBB->addSuccessor(LoopDoneMBB);
-  LoopCondMBB->addLiveIn(AlignTarget);
-
-  // create loop body MBB
-  MachineBasicBlock *LoopBodyMBB = MF.CreateMachineBasicBlock(LLVM_BB);
-  MF.insert(++LoopCondMBB->getIterator(), LoopBodyMBB);
-  LoopCondMBB->addSuccessor(LoopBodyMBB);
-  LoopBodyMBB->addSuccessor(LoopCondMBB);
-
-  // add loop condition: exit when stack reg equal to temp
-  BuildMI(LoopCondMBB, DL, TII->get(RISCV::BEQ))
-      .addReg(AlignTarget)
-      .addReg(StackIntReg)
-      .addMBB(LoopDoneMBB);
-
-  // loop body: do uninit store and jump to condition
-  BuildMI(LoopBodyMBB, DL, TII->get(RISCV::USC_CAP), StackCapReg)
-      .addReg(RISCV::C0)
-      .addReg(StackCapReg);
-  BuildMI(LoopBodyMBB, DL, TII->get(RISCV::PseudoCBR))
-      .addMBB(LoopCondMBB);
-
-  return LoopDoneMBB;
-}
-
-static unsigned int
-getUnsignedWriteOpcodeForSize(unsigned int Size)
-{
-  switch (Size) {
-    case 1:
-      return RISCV::USB_CAP;
-    case 2:
-      return RISCV::USH_CAP;
-    case 4:
-      return RISCV::USW_CAP;
-    case 8:
-      return RISCV::USD_CAP;
-    case 16:
-      return RISCV::USC_CAP;
-    default:
-      assert(false && "Unexpected size!");
-  }
-}
-
-static MachineBasicBlock *
 emitUninitStoreStackArgs(MachineInstr &MI, MachineBasicBlock *BB,
                          const RISCVSubtarget &Subtarget) {
   assert(false && "Implement this!");
@@ -10892,12 +10801,11 @@ emitUninitShrinkStack(MachineInstr &MI, MachineBasicBlock *BB,
                       const RISCVSubtarget &Subtarget) {
   MachineBasicBlock &MBB = *BB;
   MachineBasicBlock::iterator MBBI = std::next(MachineBasicBlock::iterator(MI));
-  MachineFunction &MF = *BB->getParent();
   DebugLoc DL = MI.getDebugLoc();
   const TargetInstrInfo *TII = Subtarget.getInstrInfo();
   Register StackCapReg = RISCV::C2;
-  MachineRegisterInfo &RegInfo = MF.getRegInfo();
-  Register TempReg = RegInfo.createVirtualRegister(&RISCV::GPRRegClass);
+  // fuck it hardcode this, it gets clobbered by cjump anyway
+  Register TempReg = RISCV::X6;
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::CShrinkImm), StackCapReg)
       .addReg(StackCapReg)
       .addImm(MI.getOperand(0).getImm());
@@ -10944,7 +10852,7 @@ RISCVTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   case RISCV::PseudoQuietFLT_D:
     return emitQuietFCMP(MI, BB, RISCV::FLT_D, RISCV::FEQ_D, Subtarget);
   case RISCV::PseudoClearRegs:
-    return emitPseudoClearRegs(MI, BB, Subtarget);
+    return transformPseudoClearRegs(MI, BB, Subtarget);
   case RISCV::PseudoUCCALL:
     return emitPseudoUCCALL(MI, BB, Subtarget);
   case RISCV::PseudoCShrinkStack:
@@ -11841,7 +11749,28 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
   return std::make_tuple(OutChain, ActrecPtr, RAAddrSym);
 }
 
+uint32_t CalculateCapClearMask(const uint32_t *RegMask)
+{
+  static const uint32_t CapBaseMask = 0xfffffffe;
+  // The register mask is indexed by the RISCV register enum, which causes the
+  // capability register mask to be
+  uint32_t CapPreserveMask = 0;
+  static_assert(sizeof(CapPreserveMask) == sizeof(*RegMask), "");
+  const uint32_t MaskWidth = sizeof(CapPreserveMask) * 8;
+
+  const auto C0WordIdx = RISCV::C0 / MaskWidth;
+  const auto C0WordOff = RISCV::C0 % MaskWidth;
+  CapPreserveMask = // set bits from lower register mask word
+      CapPreserveMask | (RegMask[C0WordIdx] >> C0WordOff);
+  CapPreserveMask = // set bits from higher register mask word
+      CapPreserveMask | (RegMask[C0WordIdx+1] << (MaskWidth - C0WordOff));
+
+  // negate preserve mask,
+  return CapBaseMask & ~CapPreserveMask;
+}
+
 // Transform physical registers into virtual registers.
+// UNINITTODO: reserve register for uninit varargs here
 SDValue RISCVTargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &DL,
@@ -12305,33 +12234,16 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   if (!MemOpChains.empty())
     Chain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, MemOpChains);
 
-  // Emit stack cap shrinking node
-  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitStackSplit) {
-    Chain = DAG.getNode(RISCVISD::CAP_SHRINK_STACK, DL, MVT::Other, {
-      Chain
-    , DAG.getConstant(0, DL, XLenVT)
-    });
+  SDValue Glue;
 
-    uint64_t PrevOffset = 0;
-    for (auto ArgIt = UninitStackArgs.rbegin(); 
-         ArgIt != UninitStackArgs.rend(); ArgIt++) {
-      auto [Arg,VA] = ArgIt->second;
-      uint64_t ArgOffset = ArgIt->first;
-      uint64_t ArgSize = VA.getLocVT().getStoreSize();
-      uint64_t ArgPad;
-      if (PrevOffset <= ArgIt->first) // first argument needs padding to align to 16 bytes
-        ArgPad = ((ArgOffset + ArgSize) % 16) ? 16 - ((ArgOffset + ArgSize) % 16) : 0;
-      else
-        ArgPad = PrevOffset - (ArgOffset + ArgSize);
-      PrevOffset = ArgOffset;
-      Chain = DAG.getNode(RISCVISD::UNINIT_STORE_STACK_ARG, DL, MVT::Other,
-                          Chain, Arg, 
-                          DAG.getConstant(ArgSize, DL, MVT::i64), 
-                          DAG.getConstant(ArgPad, DL, MVT::i64));
-    }
+  if (CallConv == CallingConv::CHERI_Uninit
+  && (CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry)) {
+    // install activation record code as return address
+    SDValue ActrecPtr = std::get<1>(ActrecNodes);
+    Chain = DAG.getCopyToReg(Chain, DL, RISCV::C1, ActrecPtr, Glue);
+    Glue = Chain.getValue(1);
   }
 
-  SDValue Glue;
   // Build a sequence of copy-to-reg nodes, chained and glued together.
   for (auto &Reg : RegsToPass) {
     Chain = DAG.getCopyToReg(Chain, DL, Reg.first, Reg.second, Glue);
@@ -12392,20 +12304,42 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
       Callee = DAG.getTargetExternalFunctionSymbol(S->getSymbol(), OpFlags);
   }
 
-  if (CallConv == CallingConv::CHERI_Uninit
-  && (CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry)) {
-    // install activation record code as return address
-    SDValue ActrecPtr = std::get<1>(ActrecNodes);
-    Chain = DAG.getCopyToReg(Chain, DL, RISCV::C1, ActrecPtr, Glue);
+  // Emit stack cap shrinking node
+  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitStackSplit) {
+    Chain = DAG.getNode(RISCVISD::CAP_SHRINK_STACK, DL, {MVT::Other, MVT::Glue}, {
+      Chain
+    , DAG.getConstant(0, DL, XLenVT)
+    , Glue
+    });
     Glue = Chain.getValue(1);
+
+    uint64_t PrevOffset = 0;
+    for (auto ArgIt = UninitStackArgs.rbegin(); 
+         ArgIt != UninitStackArgs.rend(); ArgIt++) {
+      auto [Arg,VA] = ArgIt->second;
+      uint64_t ArgOffset = ArgIt->first;
+      uint64_t ArgSize = VA.getLocVT().getStoreSize();
+      uint64_t ArgPad;
+      if (PrevOffset <= ArgIt->first) // first argument needs padding to align to 16 bytes
+        ArgPad = ((ArgOffset + ArgSize) % 16) ? 16 - ((ArgOffset + ArgSize) % 16) : 0;
+      else
+        ArgPad = PrevOffset - (ArgOffset + ArgSize);
+      PrevOffset = ArgOffset;
+      Chain = DAG.getNode(RISCVISD::UNINIT_STORE_STACK_ARG, DL, MVT::Other,
+                          Chain, Arg, 
+                          DAG.getConstant(ArgSize, DL, MVT::i64), 
+                          DAG.getConstant(ArgPad, DL, MVT::i64),
+                        Glue);
+      Glue = Chain.getValue(1);
+    }
   }
 
   // Emit register clearing node
   if (CHERIUninitClearRegs && CallConv == CallingConv::CHERI_Uninit) {
     SmallVector<SDValue, 8> Ops;
-    const uint32_t *ClearMask = getClearMask(ArgLocs);
+    uint32_t ClearMask = CalculateCapClearMask(getClearMask(ArgLocs));
     Ops.push_back(Chain);
-    Ops.push_back(DAG.getRegisterMask(ClearMask));
+    Ops.push_back(DAG.getConstant(ClearMask, DL, MVT::i64));
     if (Glue.getNode()) Ops.push_back(Glue);
     SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
     Chain = DAG.getNode(RISCVISD::CLEAR_REGS, DL, NodeTys, Ops);
@@ -12596,9 +12530,9 @@ RISCVTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
 
   if(CHERIUninitClearRegs && CallConv == CallingConv::CHERI_Uninit) {
     SmallVector<SDValue, 3> CROps;
-    const uint32_t *ClearMask = getClearMask(RVLocs);
+    uint32_t ClearMask = CalculateCapClearMask(getClearMask(RVLocs));
     CROps.push_back(Chain);
-    CROps.push_back(DAG.getRegisterMask(ClearMask));
+    CROps.push_back(DAG.getConstant(ClearMask, DL, MVT::i64));
     if (Glue.getNode()) CROps.push_back(Glue);
     SDVTList CRNodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
     Chain = DAG.getNode(RISCVISD::CLEAR_REGS, DL, CRNodeTys, CROps);

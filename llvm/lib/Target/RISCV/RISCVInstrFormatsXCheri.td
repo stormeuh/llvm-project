@@ -24,6 +24,11 @@ def uimm12 : Operand<XLenVT>, ImmLeaf<XLenVT, [{return isUInt<12>(Imm);}]> {
   let DecoderMethod = "decodeUImmOperand<12>";
 }
 
+def uimm32 : Operand<XLenVT>, ImmLeaf<XLenVT, [{return isUInt<32>(Imm);}]> {
+  let ParserMatchClass = UImmAsmOperand<32>;
+  let DecoderMethod = "decodeUImmOperand<32>";
+}
+
 def SpecialCapRegisterAsmOperand : AsmOperandClass {
   let Name = "SpecialCapRegister";
   let ParserMethod = "parseSpecialCapRegister";
