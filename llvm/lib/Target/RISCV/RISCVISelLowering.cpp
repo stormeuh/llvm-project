@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "RISCVISelLowering.h"
+#include "MCTargetDesc/RISCVBaseInfo.h"
 #include "MCTargetDesc/RISCVCompressedCap.h"
 #include "MCTargetDesc/RISCVMCTargetDesc.h"
 #include "MCTargetDesc/RISCVMatInt.h"
@@ -54,6 +55,7 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
+#include <utility>
 #include "CHERIUninitTrampoline.h"
 
 using namespace llvm;
@@ -4263,16 +4265,24 @@ SDValue RISCVTargetLowering::lowerBRCOND(SDValue Op, SelectionDAG &DAG) const {
 SDValue RISCVTargetLowering::lowerVASTART(SDValue Op, SelectionDAG &DAG) const {
   MachineFunction &MF = DAG.getMachineFunction();
   RISCVMachineFunctionInfo *FuncInfo = MF.getInfo<RISCVMachineFunctionInfo>();
+  EVT PtrVT = getPointerTy(DAG.getDataLayout(),
+                             DAG.getDataLayout().getGlobalsAddressSpace());
 
   SDLoc DL(Op);
   unsigned AllocaAS = MF.getDataLayout().getAllocaAddrSpace();
-  SDValue FI = DAG.getFrameIndex(FuncInfo->getVarArgsFrameIndex(),
-                                 getPointerTy(MF.getDataLayout(), AllocaAS));
+
+  SDValue VAPtr;
+  if (Subtarget.hasUninitStack() || Subtarget.hasReserveStack()) {
+    VAPtr = DAG.getRegister(FuncInfo->getStackPassedArgRegister(), PtrVT);
+  } else {
+    VAPtr = DAG.getFrameIndex(FuncInfo->getVarArgsFrameIndex(),
+                              getPointerTy(MF.getDataLayout(), AllocaAS));
+  }
 
   // vastart just stores the address of the VarArgsFrameIndex slot into the
   // memory location argument.
   const Value *SV = cast<SrcValueSDNode>(Op.getOperand(2))->getValue();
-  return DAG.getStore(Op.getOperand(0), DL, FI, Op.getOperand(1),
+  return DAG.getStore(Op.getOperand(0), DL, VAPtr, Op.getOperand(1),
                       MachinePointerInfo(SV));
 }
 
@@ -11758,6 +11768,7 @@ SDValue RISCVTargetLowering::LowerFormalArguments(
     SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
 
   MachineFunction &MF = DAG.getMachineFunction();
+  RISCVMachineFunctionInfo *RVFI = MF.getInfo<RISCVMachineFunctionInfo>();
 
   switch (CallConv) {
   default:
@@ -11801,6 +11812,7 @@ SDValue RISCVTargetLowering::LowerFormalArguments(
   // Assign locations to all of the incoming arguments.
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CallConv, IsVarArg, MF, ArgLocs, *DAG.getContext());
+  MachineRegisterInfo &RegInfo = MF.getRegInfo();
 
   if (CallConv == CallingConv::GHC)
     CCInfo.AnalyzeFormalArguments(Ins, CC_RISCV_GHC);
@@ -11849,19 +11861,24 @@ SDValue RISCVTargetLowering::LowerFormalArguments(
   }
 
   MachineFrameInfo &MFI = MF.getFrameInfo();
-  RISCVMachineFunctionInfo *RVFI = MF.getInfo<RISCVMachineFunctionInfo>();
   unsigned XLenInBytes = Subtarget.getXLen() / 8;
   if (IsVarArg && RISCVABI::isCheriPureCapABI(Subtarget.getTargetABI())) {
-    // Record the frame index of the first variable argument
-    // which is a value necessary to VASTART.
-    int FI = MFI.CreateFixedObject(XLenInBytes, CCInfo.getNextStackOffset(),
-                                   true);
-    RVFI->setVarArgsFrameIndex(FI);
+    if (IsVarArg && (Subtarget.hasUninitStack() || Subtarget.hasReserveStack())) {
+      Register StackPassedArgRegister = RVFI->getStackPassedArgRegister();
+      DAG.getRegister(StackPassedArgRegister, PtrVT);
+      CCInfo.AllocateReg(StackPassedArgRegister);
+      RegInfo.addLiveIn(StackPassedArgRegister);
+    } else {
+      // Record the frame index of the first variable argument
+      // which is a value necessary to VASTART.
+      int FI = MFI.CreateFixedObject(XLenInBytes, CCInfo.getNextStackOffset(),
+                                    true);
+      RVFI->setVarArgsFrameIndex(FI);
+    }
   } else if (IsVarArg) {
     ArrayRef<MCPhysReg> ArgRegs = makeArrayRef(ArgGPRs);
     unsigned Idx = CCInfo.getFirstUnallocated(ArgRegs);
     const TargetRegisterClass *RC = &RISCV::GPRRegClass;
-    MachineRegisterInfo &RegInfo = MF.getRegInfo();
 
     // Offset of the first variable argument from stack pointer, and size of
     // the vararg save area. For now, the varargs save area is either zero or
@@ -12020,10 +12037,14 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   MachineFunction &MF = DAG.getMachineFunction();
   bool hasFramePointer = RISCVGenRegisterInfo::getFrameLowering(MF)->hasFP(MF);
   RISCVSubtarget::CHERIUninitEncapOpts CHERIUninitEncap = Subtarget.getCHERIUninitEncap();
+  RISCVMachineFunctionInfo *RVFI = MF.getInfo<RISCVMachineFunctionInfo>();
 
   // Analyze the operands of the call, assigning locations to each operand.
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState ArgCCInfo(CallConv, IsVarArg, MF, ArgLocs, *DAG.getContext());
+  if (IsVarArg && (Subtarget.hasUninitStack() || Subtarget.hasReserveStack())) {
+    ArgCCInfo.AllocateReg(RVFI->getStackPassedArgRegister());
+  }
 
   if (CallConv == CallingConv::GHC)
     ArgCCInfo.AnalyzeCallOperands(Outs, CC_RISCV_GHC);
@@ -12094,8 +12115,8 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   // Copy argument values to their designated locations.
   SmallVector<std::pair<Register, SDValue>, 8> RegsToPass;
   SmallVector<SDValue, 8> MemOpChains;
-  std::map<uint64_t, std::tuple<SDValue,CCValAssign>> UninitStackArgs;
   SDValue StackPtr;
+  uint64_t StackPassedArgStructSize = 0;
   for (unsigned i = 0, j = 0, e = ArgLocs.size(); i != e; ++i) {
     CCValAssign &VA = ArgLocs[i];
     SDValue ArgValue = OutVals[i];
@@ -12205,18 +12226,29 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
                                getStackPointerRegisterToSaveRestore(),
                                PtrVT);
 
-      if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitStackSplit) {
-        // we emit custom stores for this later on
-        UninitStackArgs[VA.getLocMemOffset()] = {ArgValue,VA};
-      } else {
       SDValue Address =
           DAG.getPointerAdd(DL, StackPtr, VA.getLocMemOffset());
+      if (VA.getLocMemOffset() > StackPassedArgStructSize) 
+        StackPassedArgStructSize = VA.getLocMemOffset();
 
       // Emit the store.
       MemOpChains.push_back(
           DAG.getStore(Chain, DL, ArgValue, Address, MachinePointerInfo()));
-      }
     }
+  }
+
+  if (IsVarArg && (Subtarget.hasUninitStack() || Subtarget.hasReserveStack())) {
+    // align to 16 byte boundary
+    StackPassedArgStructSize += 16 - (StackPassedArgStructSize % 16);
+    SDValue StackPassedArgStructPtr = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, DL, PtrVT, {
+      DAG.getTargetConstant(Intrinsic::cheri_bounded_stack_cap, DL, XLenVT)
+    , StackPtr
+    , DAG.getConstant(StackPassedArgStructSize, DL, XLenVT)
+    });
+    RegsToPass.push_back(std::make_pair(
+      RVFI->getStackPassedArgRegister(),
+      StackPassedArgStructPtr
+    ));
   }
 
   // Join the stores, which are independent of one another.
@@ -12302,26 +12334,6 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     , Glue
     });
     Glue = Chain.getValue(1);
-
-    uint64_t PrevOffset = 0;
-    for (auto ArgIt = UninitStackArgs.rbegin(); 
-         ArgIt != UninitStackArgs.rend(); ArgIt++) {
-      auto [Arg,VA] = ArgIt->second;
-      uint64_t ArgOffset = ArgIt->first;
-      uint64_t ArgSize = VA.getLocVT().getStoreSize();
-      uint64_t ArgPad;
-      if (PrevOffset <= ArgIt->first) // first argument needs padding to align to 16 bytes
-        ArgPad = ((ArgOffset + ArgSize) % 16) ? 16 - ((ArgOffset + ArgSize) % 16) : 0;
-      else
-        ArgPad = PrevOffset - (ArgOffset + ArgSize);
-      PrevOffset = ArgOffset;
-      Chain = DAG.getNode(RISCVISD::UNINIT_STORE_STACK_ARG, DL, MVT::Other,
-                          Chain, Arg, 
-                          DAG.getConstant(ArgSize, DL, MVT::i64), 
-                          DAG.getConstant(ArgPad, DL, MVT::i64),
-                        Glue);
-      Glue = Chain.getValue(1);
-    }
   }
 
   const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();

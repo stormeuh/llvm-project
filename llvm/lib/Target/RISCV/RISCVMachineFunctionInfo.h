@@ -17,6 +17,8 @@
 #include "llvm/CodeGen/MIRYamlMapping.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/Register.h"
+#include "llvm/CodeGen/SelectionDAGNodes.h"
 
 namespace llvm {
 
@@ -64,6 +66,9 @@ private:
   /// Size of stack frame to save callee saved registers
   unsigned CalleeSavedStackSize = 0;
 
+  /// Register with capability to stack passed arg struct
+  Register StackPassedArgRegister = RISCV::C30;
+
 public:
   RISCVMachineFunctionInfo(const MachineFunction &MF) {}
 
@@ -109,6 +114,9 @@ public:
   void setCalleeSavedStackSize(unsigned Size) { CalleeSavedStackSize = Size; }
 
   void initializeBaseYamlFields(const yaml::RISCVMachineFunctionInfo &YamlMFI);
+
+  Register getStackPassedArgRegister() const { return StackPassedArgRegister; }
+  void setStackPassedArgRegister(Register Reg) { StackPassedArgRegister = Reg; }
 };
 
 } // end namespace llvm
