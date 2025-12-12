@@ -40,6 +40,7 @@
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/ValueTypes.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/IRBuilder.h"
@@ -68,20 +69,6 @@ static cl::opt<bool>
                                   cl::desc("Use the legacy indirect call lowering for "
                                            "pure-capability function calls"),
                                   cl::init(false), cl::Hidden);
-
-enum CHERIUninitEncapOpts {
-  none, trampoline, isentry
-};
-
-static cl::opt<CHERIUninitEncapOpts>
-    CHERIUninitReturnEncap("cheri-uninit-return-encapsulation",
-                           cl::desc("Select which return encapsulation mechanism"
-                           "to use when calling with the uninit CC"),
-                           cl::values(
-                            clEnumVal(none, "No encapsulation"),
-                            clEnumVal(trampoline, "Trampoline"),
-                            clEnumVal(isentry, "Indirect sentry")
-                           ));
 
 static cl::opt<bool>
     CHERIUninitClearRegs("cheri-uninit-clear-regs",
@@ -137,7 +124,6 @@ RISCVTargetLowering::RISCVTargetLowering(const TargetMachine &TM,
   case RISCVABI::ABI_L64PC128:
   case RISCVABI::ABI_L64PC128F:
   case RISCVABI::ABI_L64PC128D:
-  case RISCVABI::ABI_L64PCU128:
     break;
   }
 
@@ -10693,25 +10679,6 @@ transformPseudoClearRegs(MachineInstr &MI, MachineBasicBlock *BB,
   MachineInstrBuilder MIB = MachineInstrBuilder(*BB->getParent(), &MI);
   DebugLoc DL = MI.getDebugLoc();
   const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
-
-  // // retrieve register mask operand from pseudo, remove implicit defs
-  // const uint32_t *RegMask = MI.getOperand(0).getRegMask();
-
-  // // The register mask is indexed by the RISCV register enum, which causes the
-  // // capability register mask to be
-  // uint32_t CapPreserveMask = 0;
-  // static_assert(sizeof(CapPreserveMask) == sizeof(*RegMask), "");
-  // const uint32_t MaskWidth = sizeof(CapPreserveMask) * 8;
-
-  // const auto C0WordIdx = RISCV::C0 / MaskWidth;
-  // const auto C0WordOff = RISCV::C0 % MaskWidth;
-  // CapPreserveMask = // set bits from lower register mask word
-  //     CapPreserveMask | (RegMask[C0WordIdx] >> C0WordOff);
-  // CapPreserveMask = // set bits from higher register mask word
-  //     CapPreserveMask | (RegMask[C0WordIdx+1] << (MaskWidth - C0WordOff));
-
-  // // negate preserve mask,
-  // uint32_t CapClearMask = CapBaseMask & ~CapPreserveMask;
   
   // add mask as immediate to MI, and add implicit defs for RA
   uint32_t CapClearMask = MI.getOperand(0).getImm();
@@ -10740,7 +10707,7 @@ emitPseudoUCCALL(MachineInstr &MI, MachineBasicBlock *BB,
   // Register IDC = RISCV::C31;
 
   int CallOpc; 
-  if (CHERIUninitReturnEncap == isentry)
+  if (Subtarget.getCHERIUninitEncap() == RISCVSubtarget::isentry)
     if (RISCVGenRegisterInfo::getFrameLowering(MF)->hasFP(MF))
       CallOpc = RISCV::PseudoCCALLIndirectSentryFP;
     else 
@@ -10817,6 +10784,38 @@ emitUninitShrinkStack(MachineInstr &MI, MachineBasicBlock *BB,
   return BB;
 }
 
+static MachineBasicBlock *
+emitUninitShrinkReserveStack(MachineInstr &MI, MachineBasicBlock *BB,
+                             const RISCVSubtarget &Subtarget) {
+  MachineBasicBlock &MBB = *BB;
+  MachineBasicBlock::iterator MBBI = std::next(MachineBasicBlock::iterator(MI));
+  DebugLoc DL = MI.getDebugLoc();
+  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+  MachineRegisterInfo &RegInfo = BB->getParent()->getRegInfo();
+
+  Register StackReg = RISCV::C2;
+  Register ReserveStackReg = RISCV::C31;
+  Register CapTempReg = RegInfo.createVirtualRegister(&RISCV::GPCRRegClass);
+  Register IntTempReg = RegInfo.createVirtualRegister(&RISCV::GPRRegClass);
+
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CClearTag), CapTempReg)
+      .addReg(ReserveStackReg);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CGetBase), IntTempReg)
+      .addReg(StackReg);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetAddr), CapTempReg)
+      .addReg(CapTempReg)
+      .addReg(IntTempReg);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CShrinkImm), CapTempReg)
+      .addReg(CapTempReg)
+      .addImm(0);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CBuildCap), ReserveStackReg)
+      .addReg(ReserveStackReg)
+      .addReg(CapTempReg);
+
+  MI.eraseFromParent();
+  return BB;
+}
+
 MachineBasicBlock *
 RISCVTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
                                                  MachineBasicBlock *BB) const {
@@ -10857,6 +10856,8 @@ RISCVTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     return emitPseudoUCCALL(MI, BB, Subtarget);
   case RISCV::PseudoCShrinkStack:
     return emitUninitShrinkStack(MI, BB, Subtarget);
+  case RISCV::PseudoCShrinkReserveStack:
+    return emitUninitShrinkReserveStack(MI, BB, Subtarget);
   case RISCV::PseudoUninitStoreStackArgIntWithPad:
     return emitUninitStoreStackArgs(MI, BB, Subtarget);
   }
@@ -11031,7 +11032,6 @@ static bool CC_RISCV(const DataLayout &DL, RISCVABI::ABI ABI, unsigned ValNo,
   case RISCVABI::ABI_LP64:
   case RISCVABI::ABI_IL32PC64:
   case RISCVABI::ABI_L64PC128:
-  case RISCVABI::ABI_L64PCU128:
     break;
   case RISCVABI::ABI_ILP32F:
   case RISCVABI::ABI_LP64F:
@@ -11621,33 +11621,22 @@ static bool CC_RISCV_GHC(unsigned ValNo, MVT ValVT, MVT LocVT,
   return true;
 }
 
-static uint32_t *getClearMask(
+BitVector GetCallReservedRegs(
+    const MachineFunction &MF,
+    const TargetRegisterInfo *TRI,
     const SmallVectorImpl<CCValAssign> &ArgLocs) {
-  uint32_t *TempMask = new uint32_t[(RISCV::NUM_TARGET_REGS / 32) + 1];
-  const auto MaskWidth = sizeof(uint32_t) * 8;
-  // default set no registers will be preserved
-  for (size_t I = 0; I < (RISCV::NUM_TARGET_REGS / 32) + 1; I++) TempMask[I] = 0;
-  SmallVector<Register, 32> NoClearRegs = {
-      RISCV::C0, RISCV::X0,
-      RISCV::C1, RISCV::X1,
-      RISCV::C2, RISCV::X2,
-      RISCV::C8, RISCV::X8
-  };
+  BitVector ReservedRegs = TRI->getReservedRegs(MF);
+  // Always preserve return address
+  TRI->markSuperRegs(ReservedRegs, RISCV::C1);
+
+  // Mark argument registers as reserved
   for (const CCValAssign ArgLoc : ArgLocs) {
     if (ArgLoc.isRegLoc()) {
-      // TODO: merged register bank is presumed for now
-      if (ArgLoc.getLocReg() > RISCV::X0 && ArgLoc.getLocReg() <= RISCV::X31)
-        NoClearRegs.push_back(ArgLoc.getLocReg() - (RISCV::X0 - RISCV::C0));
-      else NoClearRegs.push_back(ArgLoc.getLocReg());
+      TRI->markSuperRegs(ReservedRegs, ArgLoc.getLocReg());
     }
   }
-  // unset all argument registers
-  for (const Register Reg : NoClearRegs) {
-    auto RegWordIdx = Reg / MaskWidth;
-    auto RegWordOff = Reg % MaskWidth;
-    TempMask[RegWordIdx] = TempMask[RegWordIdx] | (1 << RegWordOff);
-  }
-  return TempMask;
+
+  return ReservedRegs;
 }
 
 SmallVector<SDValue,8> emitActivationRecordCode(SDValue Chain, SDLoc &DL, SelectionDAG &DAG, 
@@ -11669,10 +11658,9 @@ SmallVector<SDValue,8> emitActivationRecordCode(SDValue Chain, SDLoc &DL, Select
 }
 
 std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
-    SDValue Chain, SDLoc &DL, SelectionDAG &DAG, MachineFunction &MF, 
-    EVT PtrVT, EVT XLenVT, bool HasFP) 
+    SDValue Chain, SDLoc &DL, SelectionDAG &DAG, MachineFunction &MF,
+    EVT PtrVT, EVT XLenVT, bool HasFP, RISCVSubtarget::CHERIUninitEncapOpts Encap) 
     {
-  assert(CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry);
 
   // factor sizing information out of code below
   unsigned PtrVTSize = PtrVT.getStoreSize();
@@ -11682,14 +11670,14 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
   unsigned ActrecCodeSize = ActrecCode.size() * 8;
 
   unsigned ActrecSize = PtrVTSize * 2; // minimum size is stack cap and return cap
-  if (CHERIUninitReturnEncap == trampoline) ActrecSize += ActrecCodeSize;
+  if (Encap == RISCVSubtarget::trampoline) ActrecSize += ActrecCodeSize;
   if (HasFP) ActrecSize += PtrVTSize;
   unsigned ActrecOffset;
-  switch(CHERIUninitReturnEncap) {
-    case trampoline:
+  switch(Encap) {
+    case RISCVSubtarget::trampoline:
       ActrecOffset = ActrecSize - ActrecCodeSize;
       break;
-    case isentry:
+    case RISCVSubtarget::isentry:
       ActrecOffset = HasFP ? PtrVTSize : 0;
       break;
     default:
@@ -11726,7 +11714,7 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
   ActrecStores.push_back(DAG.getStore(Chain, DL, CSPReg, NextPtr, MachinePointerInfo(200)));
   NextPtr = DAG.getPointerAdd(DL, NextPtr, PtrVTSize); // advance pointer
 
-  if (CHERIUninitReturnEncap == trampoline)
+  if (Encap == RISCVSubtarget::trampoline)
     ActrecStores.append(emitActivationRecordCode(Chain, DL, DAG, NextPtr, ActrecCode));
 
   // Place bounds on the activation record capability
@@ -11738,7 +11726,7 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
   // offset if necessary
   if (ActrecOffset) ActrecPtr = DAG.getPointerAdd(DL, ActrecPtr, ActrecOffset);
   // seal
-  auto SealingOp = (CHERIUninitReturnEncap == trampoline
+  auto SealingOp = (Encap == RISCVSubtarget::trampoline
                  ? Intrinsic::cheri_cap_seal_entry
                  : Intrinsic::cheri_cap_seal_indirect_pcc);
   ActrecPtr = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, DL, PtrVT, {
@@ -11749,23 +11737,16 @@ std::tuple<SDValue,SDValue,SDValue> emitActivationRecord(
   return std::make_tuple(OutChain, ActrecPtr, RAAddrSym);
 }
 
-uint32_t CalculateCapClearMask(const uint32_t *RegMask)
+uint32_t CalculateCapClearMask(const BitVector CallReservedRegs)
 {
+  // Don't clear DDC, ever.
   static const uint32_t CapBaseMask = 0xfffffffe;
-  // The register mask is indexed by the RISCV register enum, which causes the
-  // capability register mask to be
   uint32_t CapPreserveMask = 0;
-  static_assert(sizeof(CapPreserveMask) == sizeof(*RegMask), "");
-  const uint32_t MaskWidth = sizeof(CapPreserveMask) * 8;
+  for (Register Reg = RISCV::C1; Reg <= RISCV::C31; Reg = Reg + 1)
+  {
+    CapPreserveMask += ((uint32_t) CallReservedRegs.test(Reg)) << (Reg - RISCV::C0);
+  }
 
-  const auto C0WordIdx = RISCV::C0 / MaskWidth;
-  const auto C0WordOff = RISCV::C0 % MaskWidth;
-  CapPreserveMask = // set bits from lower register mask word
-      CapPreserveMask | (RegMask[C0WordIdx] >> C0WordOff);
-  CapPreserveMask = // set bits from higher register mask word
-      CapPreserveMask | (RegMask[C0WordIdx+1] << (MaskWidth - C0WordOff));
-
-  // negate preserve mask,
   return CapBaseMask & ~CapPreserveMask;
 }
 
@@ -12038,6 +12019,7 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   
   MachineFunction &MF = DAG.getMachineFunction();
   bool hasFramePointer = RISCVGenRegisterInfo::getFrameLowering(MF)->hasFP(MF);
+  RISCVSubtarget::CHERIUninitEncapOpts CHERIUninitEncap = Subtarget.getCHERIUninitEncap();
 
   // Analyze the operands of the call, assigning locations to each operand.
   SmallVector<CCValAssign, 16> ArgLocs;
@@ -12092,13 +12074,20 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   if (!IsTailCall)
     Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, CLI.DL);
 
-
+  SDValue ReserveStackSpillSlot = SDValue();
   std::tuple<SDValue, SDValue, SDValue> ActrecNodes;
-  if(CHERIUninitReturnEncap != none) {
+  if(CHERIUninitEncap != RISCVSubtarget::none) {
     // Emit activation record onto the stack
     if (CallConv == CallingConv::CHERI_Uninit) {
-      ActrecNodes = emitActivationRecord(Chain, DL, DAG, MF, PtrVT, XLenVT, hasFramePointer);
+      ActrecNodes = emitActivationRecord(Chain, DL, DAG, MF, PtrVT, XLenVT, hasFramePointer, CHERIUninitEncap);
       Chain = std::get<0>(ActrecNodes);
+
+      if (Subtarget.hasReserveStack()) {
+        ReserveStackSpillSlot = DAG.getFrameIndex(
+          MF.getFrameInfo().CreateSpillStackObject(PtrVT.getStoreSize(), getPrefTypeAlign(PtrVT, DAG)), PtrVT);
+        Chain = DAG.getStore(Chain, DL, DAG.getRegister(RISCV::C31, PtrVT), ReserveStackSpillSlot, MachinePointerInfo(200));
+        Chain = DAG.getNode(RISCVISD::CAP_SHRINK_RESERVE_STACK, DL, MVT::Other, Chain);
+      }
     }
   }
 
@@ -12237,7 +12226,8 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   SDValue Glue;
 
   if (CallConv == CallingConv::CHERI_Uninit
-  && (CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry)) {
+  && (CHERIUninitEncap == RISCVSubtarget::trampoline 
+   || CHERIUninitEncap == RISCVSubtarget::isentry)) {
     // install activation record code as return address
     SDValue ActrecPtr = std::get<1>(ActrecNodes);
     Chain = DAG.getCopyToReg(Chain, DL, RISCV::C1, ActrecPtr, Glue);
@@ -12334,10 +12324,11 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     }
   }
 
+  const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
   // Emit register clearing node
   if (CHERIUninitClearRegs && CallConv == CallingConv::CHERI_Uninit) {
     SmallVector<SDValue, 8> Ops;
-    uint32_t ClearMask = CalculateCapClearMask(getClearMask(ArgLocs));
+    uint32_t ClearMask = CalculateCapClearMask(GetCallReservedRegs(MF, TRI, ArgLocs));
     Ops.push_back(Chain);
     Ops.push_back(DAG.getConstant(ClearMask, DL, MVT::i64));
     if (Glue.getNode()) Ops.push_back(Glue);
@@ -12353,7 +12344,8 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
   // Add return symbol to the arguments
   if (CallConv == CallingConv::CHERI_Uninit
-  && (CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry)) {
+  && (CHERIUninitEncap == RISCVSubtarget::trampoline 
+   || CHERIUninitEncap == RISCVSubtarget::isentry)) {
     Ops.push_back(std::get<2>(ActrecNodes));
   }
 
@@ -12364,7 +12356,6 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
   if (!IsTailCall) {
     // Add a register mask operand representing the call-preserved registers.
-    const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
     const uint32_t *Mask = TRI->getCallPreservedMask(MF, CallConv);
     assert(Mask && "Missing call preserved mask for calling convention");
     Ops.push_back(DAG.getRegisterMask(Mask));
@@ -12379,6 +12370,7 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
   if (IsTailCall) {
     MF.getFrameInfo().setHasTailCall();
+    assert(CallConv != CallingConv::CHERI_Uninit && "Uninit tail calls not supported!");
     if (RISCVABI::isCheriPureCapABI(Subtarget.getTargetABI()))
       return DAG.getNode(RISCVISD::CAP_TAIL, DL, NodeTys, Ops);
     else
@@ -12387,7 +12379,8 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
   if (RISCVABI::isCheriPureCapABI(Subtarget.getTargetABI())) {
     if (CallConv == CallingConv::CHERI_Uninit
-    && (CHERIUninitReturnEncap == trampoline || CHERIUninitReturnEncap == isentry)) {
+    && (CHERIUninitEncap == RISCVSubtarget::trampoline 
+     || CHERIUninitEncap == RISCVSubtarget::isentry)) {
         Chain = DAG.getNode(RISCVISD::UNINIT_CALL, DL, NodeTys, Ops);
     } else
       Chain = DAG.getNode(RISCVISD::CAP_CALL, DL, NodeTys, Ops);
@@ -12396,6 +12389,11 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
   DAG.addNoMergeSiteInfo(Chain.getNode(), CLI.NoMerge);
   Glue = Chain.getValue(1);
+
+  if(ReserveStackSpillSlot.getNode()) {
+    Chain = DAG.getCopyToReg(Chain, DL, RISCV::C31, ReserveStackSpillSlot, Glue);
+    Glue = Chain.getValue(1);
+  }
 
   // Mark the end of the call, which is glued to the call itself.
   Chain = DAG.getCALLSEQ_END(Chain,
@@ -12466,6 +12464,7 @@ RISCVTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
                                  const SDLoc &DL, SelectionDAG &DAG) const {
   const MachineFunction &MF = DAG.getMachineFunction();
   const RISCVSubtarget &STI = MF.getSubtarget<RISCVSubtarget>();
+  RISCVSubtarget::CHERIUninitEncapOpts CHERIUninitEncap = STI.getCHERIUninitEncap();
 
   // Stores the assignment of the return value to a location.
   SmallVector<CCValAssign, 16> RVLocs;
@@ -12529,8 +12528,9 @@ RISCVTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
   }
 
   if(CHERIUninitClearRegs && CallConv == CallingConv::CHERI_Uninit) {
+    const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
     SmallVector<SDValue, 3> CROps;
-    uint32_t ClearMask = CalculateCapClearMask(getClearMask(RVLocs));
+    uint32_t ClearMask = CalculateCapClearMask(GetCallReservedRegs(MF, TRI, RVLocs));
     CROps.push_back(Chain);
     CROps.push_back(DAG.getConstant(ClearMask, DL, MVT::i64));
     if (Glue.getNode()) CROps.push_back(Glue);
@@ -12549,7 +12549,7 @@ RISCVTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
   unsigned RetOpc = RISCVISD::RET_FLAG;
 
   // returning with an indirect sentry requires CInvokeLAL instead of CRet
-  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitReturnEncap == isentry) {
+  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitEncap == RISCVSubtarget::isentry) {
     RetOpc = RISCVISD::RET_FLAG_INDIRECT;
   }
 
@@ -12767,6 +12767,7 @@ const char *RISCVTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(SWAP_CSR)
   NODE_NAME_CASE(CLEAR_REGS)
   NODE_NAME_CASE(CAP_SHRINK_STACK)
+  NODE_NAME_CASE(CAP_SHRINK_RESERVE_STACK)
   NODE_NAME_CASE(UNINIT_CALL)
   NODE_NAME_CASE(RET_FLAG_INDIRECT)
   NODE_NAME_CASE(UNINIT_STORE_STACK_ARG)

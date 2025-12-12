@@ -104,6 +104,9 @@ private:
                                 const DebugLoc &DL, Register SourceReg,
                                 int64_t Amount,
                                 MachineInstr::MIFlag Flag) const;
+  void emitReplenishCheck(MachineFunction &MF, MachineBasicBlock &MBB,
+                          MachineBasicBlock::iterator MI,
+                          const DebugLoc &DL) const;
 };
 } // namespace llvm
 #endif

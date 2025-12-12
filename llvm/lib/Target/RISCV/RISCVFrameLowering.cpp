@@ -20,6 +20,7 @@
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -247,7 +248,7 @@ bool RISCVFrameLowering::hasFP(const MachineFunction &MF) const {
   // bounds to be representable on CHERI Concentrate. We disable FP in this
   // case because FP bounds get set to only the stack frame.
   bool IsLargeFrame = !isInt<14>(getStackSizeWithRVVPadding(MF));
-  if (STI.getTargetABI() == RISCVABI::ABI_L64PCU128 && IsLargeFrame)
+  if (STI.hasUninitStack() && IsLargeFrame)
     return false;
 
   return MF.getTarget().Options.DisableFramePointerElim(MF) ||
@@ -320,7 +321,7 @@ void RISCVFrameLowering::adjustReg(MachineBasicBlock &MBB,
   if (DestReg == SrcReg && Val == 0)
     return;
 
-  if (STI.getTargetABI() == RISCVABI::ABI_L64PCU128) {
+  if (STI.hasUninitStack()) {
     assert(!(SrcReg != getSPReg() && DestReg == getSPReg() && Val >= 0) &&
            "Positive adjustment from other register into stack register not "
            "supported!");
@@ -620,6 +621,31 @@ void RISCVFrameLowering::adjustStackForRVV(MachineFunction &MF,
       .setMIFlag(Flag);
 }
 
+#define RESERVE_STACK_REPLENISH_THRESHOLD (8192)
+void RISCVFrameLowering::emitReplenishCheck(MachineFunction &MF, MachineBasicBlock &MBB,
+                               MachineBasicBlock::iterator MBBI,
+                               const DebugLoc &DL) const {
+  auto Flag = MachineInstr::FrameSetup;
+  MachineRegisterInfo &MRI = MBB.getParent()->getRegInfo();
+  Register ThresholdReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
+  Register StackSpaceReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
+  const RISCVInstrInfo *TII = STI.getInstrInfo();
+
+  // li r_thr, threshold
+  TII->movImm(MBB, MBBI, DL, ThresholdReg, RESERVE_STACK_REPLENISH_THRESHOLD, Flag);
+  // cgetoffset r_st, csp 
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CGetOffset), StackSpaceReg)
+      .addReg(getSPReg())
+      .setMIFlag(Flag);
+
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoConditionalReplenishReserveStack))
+      .addReg(ThresholdReg)
+      .addReg(StackSpaceReg)
+      .setMIFlag(Flag);
+
+  return;
+}
+
 void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
                                       MachineBasicBlock &MBB) const {
   MachineFrameInfo &MFI = MF.getFrameInfo();
@@ -692,6 +718,11 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
   if (STI.isRegisterReservedByUser(SPReg))
     MF.getFunction().getContext().diagnose(DiagnosticInfoUnsupported{
         MF.getFunction(), "Stack pointer required, but has been reserved."});
+
+  assert(!(STI.hasReserveStack() && RealStackSize > 16384) 
+      && "Individual stack frame too large for reserve stack"); 
+  // If there is a reserve stack, emit replenishment check.
+  if (STI.hasReserveStack()) emitReplenishCheck(MF, MBB, MBBI, DL);
 
   uint64_t FirstSPAdjustAmount = getFirstSPAdjustAmount(MF);
   // Split the SP adjustment to reduce the offsets of callee saved spill.
@@ -767,7 +798,7 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
     adjustReg(MBB, MBBI, DL, SPReg, SPReg, -SecondSPAdjustAmount,
               MachineInstr::FrameSetup);
       // emit second FP adjustment to ensure it has authority over entire stack frame
-      if (STI.getTargetABI() == RISCVABI::ABI_L64PCU128 && hasFP(MF))
+      if (STI.hasUninitStack() && hasFP(MF))
         adjustReg(MBB, MBBI, DL, FPReg, SPReg, getStackSizeWithRVVPadding(MF),
               MachineInstr::FrameSetup);
 
@@ -966,12 +997,6 @@ RISCVFrameLowering::getFrameIndexReference(const MachineFunction &MF, int FI,
     MinCSFI = CSI[0].getFrameIdx();
     MaxCSFI = CSI[CSI.size() - 1].getFrameIdx();
   }
-
-  // bool IsUninitABI = RISCVABI::isUninitABI(STI.getTargetABI());
-  // bool IsVarArgRef = FI == RVFI->getVarArgsFrameIndex();
-  // bool IsUninitVarArgRef = IsUninitABI && IsVarArgRef;
-  // assert((!IsUninitVarArgRef || !MFI.hasVarSizedObjects()) && "Having varsize
-  // arguments is not supported together with varargs on the Uninit ABI yet!");
 
   if ((FI >= MinCSFI && FI <= MaxCSFI)) { // || IsUninitVarArgRef) {
     FrameReg = getSPReg();

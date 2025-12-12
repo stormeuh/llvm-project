@@ -19,6 +19,7 @@
 #include "RISCVRegisterBankInfo.h"
 #include "RISCVTargetMachine.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
@@ -210,4 +211,51 @@ bool RISCVSubtarget::enableSubRegLiveness() const {
 void RISCVSubtarget::getPostRAMutations(
     std::vector<std::unique_ptr<ScheduleDAGMutation>> &Mutations) const {
   Mutations.push_back(createRISCVMacroFusionDAGMutation());
+}
+
+static cl::opt<RISCVSubtarget::CHERIUninitEncapOpts> CHERIUninitReturnEncap(
+    "cheri-uninit-return-encapsulation",
+    cl::desc("Select which return encapsulation mechanism"
+             "to use when calling with the uninit CC"),
+    cl::values(clEnumValN(RISCVSubtarget::none, "none", "No encapsulation"),
+               clEnumValN(RISCVSubtarget::trampoline, "trampoline", "Trampoline"),
+               clEnumValN(RISCVSubtarget::isentry, "isentry", "Indirect sentry")));
+
+RISCVSubtarget::CHERIUninitEncapOpts RISCVSubtarget::getCHERIUninitEncap() const {
+  return CHERIUninitReturnEncap;
+}
+
+static cl::opt<RISCVSubtarget::CHERIStackType> CHERIStackTypeOpt(
+    "cheri-stack-type", cl::desc("Type of stack capability to expect."),
+    cl::init(RISCVSubtarget::CHERIStackDefault),
+    cl::values(
+        clEnumValN(RISCVSubtarget::CHERIStackDefault, "default",
+                   "Standard CHERI purecap stack"),
+        clEnumValN(RISCVSubtarget::CHERIStackUninit, "uninit",
+                   "Uninitialized stack capability"),
+        clEnumValN(RISCVSubtarget::CHERIStackUninitReserve, "uninitreserve",
+                   "Uninitialized stack capability with reserve stack")));
+
+RISCVSubtarget::CHERIStackType RISCVSubtarget::getCHERIStackType() const {
+  return CHERIStackTypeOpt;
+}
+
+bool RISCVSubtarget::hasUninitStack() const {
+  switch (getCHERIStackType()) {
+  case RISCVSubtarget::CHERIStackUninit:
+  case RISCVSubtarget::CHERIStackUninitReserve:
+    return true;
+  case RISCVSubtarget::CHERIStackDefault:
+    return false;
+  }
+}
+
+bool RISCVSubtarget::hasReserveStack() const {
+  switch (getCHERIStackType()) {
+  case RISCVSubtarget::CHERIStackUninitReserve:
+    return true;
+  case RISCVSubtarget::CHERIStackUninit:
+  case RISCVSubtarget::CHERIStackDefault:
+    return false;
+  }
 }

@@ -290,6 +290,24 @@ public:
 
   void getPostRAMutations(std::vector<std::unique_ptr<ScheduleDAGMutation>>
                               &Mutations) const override;
+
+  
+  enum CHERIUninitEncapOpts {
+    none, trampoline, isentry
+  };
+
+  CHERIUninitEncapOpts getCHERIUninitEncap() const;
+  
+  enum CHERIStackType {
+    CHERIStackDefault,
+    CHERIStackUninit,
+    CHERIStackUninitReserve
+  };
+
+  CHERIStackType getCHERIStackType() const;
+
+  bool hasUninitStack() const;
+  bool hasReserveStack() const;
 };
 } // End llvm namespace
 

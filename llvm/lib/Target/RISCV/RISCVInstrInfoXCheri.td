@@ -355,6 +355,9 @@ def SDT_RISCVCheriVoidUnary : SDTypeProfile<0, 1, [SDTCisInt<0>]>;
 def riscv_cap_shrink_stack : SDNode<"RISCVISD::CAP_SHRINK_STACK", SDT_RISCVCheriVoidUnary,
                                     [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue]>;
 
+def riscv_cap_shrink_reserve_stack : SDNode<"RISCVISD::CAP_SHRINK_RESERVE_STACK", SDTypeProfile<0,0,[]>,
+                                    [SDNPHasChain]>;
+
 let Predicates = [HasCheri] in {
 let Constraints = "@traps_if_sealed $rs1" in {
 let mayTrap = 1 in {
@@ -396,9 +399,17 @@ def CUninit     : Cheri_r<0x1c, "cuninit", GPCR>;
 def CDropUninit : Cheri_r<0x1d, "cdropuninit", GPCR>;
 def CShrink     : Cheri_rr<0x22, "cshrink">;
 def CShrinkImm  : Cheri_ri<0x3, "cshrink", 0>;
+def CSplice     : Cheri_rr<0x23, "csplice", GPCR, GPCR, GPCR>;
 
 let hasSideEffects = 1, mayLoad = 0, mayStore = 0, hasCtrlDep = 1, Uses = [C2], Defs = [C2], usesCustomInserter = 1 in
 def PseudoCShrinkStack : Pseudo<(outs), (ins uimm12:$imm), [(riscv_cap_shrink_stack uimm12:$imm)]>;
+
+let hasSideEffects = 1, mayLoad = 0, mayStore = 0, hasCtrlDep = 1, Uses = [C2,C31], Defs = [C31], usesCustomInserter = 1 in
+def PseudoCShrinkReserveStack : Pseudo<(outs), (ins), [(riscv_cap_shrink_reserve_stack)]>;
+
+let hasSideEffects = 0, mayLoad = 0, mayStore = 1, isBranch = 1, Uses = [C1,C2], Defs = [C2], usesCustomInserter = 1 in
+def PseudoConditionalReplenishReserveStack : Pseudo<(outs), (ins GPR:$thr, GPR:$sts), []>;
+
 }
 
 def : InstAlias<"cincoffsetimm $cd, $cs1, $imm",
@@ -1305,11 +1316,6 @@ def : PatGpcrGpcr<int_cheri_cap_type_copy, CCopyType>;
 def : PatGpcrGpcr<int_cheri_cap_conditional_seal, CCSeal>;
 def : PatGpcr<int_cheri_cap_seal_entry, CSealEntry>;
 def : PatGpcr<int_cheri_cap_seal_indirect_pcc, CSealL>;
-
-def IsUninitABI
-    : Predicate<"RISCVABI::isUninitABI(Subtarget->getTargetABI())">;
-def NotUninitABI
-    : Predicate<"!RISCVABI::isUninitABI(Subtarget->getTargetABI())">;
 
 // TODO: Make this rematerialisable like MIPS
 def : PatGpcrGpr<int_cheri_bounded_stack_cap, CSetBounds>;

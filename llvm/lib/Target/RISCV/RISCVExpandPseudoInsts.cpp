@@ -15,6 +15,7 @@
 #include "MCTargetDesc/RISCVMCTargetDesc.h"
 #include "RISCV.h"
 #include "RISCVInstrInfo.h"
+#include "RISCVSubtarget.h"
 #include "RISCVTargetMachine.h"
 
 #include "llvm/CodeGen/LivePhysRegs.h"
@@ -22,6 +23,8 @@
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineInstrBundle.h"
+#include "llvm/CodeGen/Register.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/MC/MCContext.h"
 
 using namespace llvm;
@@ -92,6 +95,9 @@ private:
   bool expandPseudoCCALLIndirectSentry(MachineBasicBlock &MBB,
                           MachineBasicBlock::iterator MBBI,
                           MachineBasicBlock::iterator &NextMBBI, bool HasFP);
+  bool expandPseudoConditionalReplenishReserveStack(MachineBasicBlock &MBB,
+                                              MachineBasicBlock::iterator MBBI,
+                                              MachineBasicBlock::iterator &NextMBBI);
 };
 
 char RISCVExpandPseudo::ID = 0;
@@ -124,6 +130,8 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
   // expanded instructions for each pseudo is correct in the Size field of the
   // tablegen definition for the pseudo.
   switch (MBBI->getOpcode()) {
+  case RISCV::PseudoConditionalReplenishReserveStack:
+    return expandPseudoConditionalReplenishReserveStack(MBB, MBBI, NextMBBI);
   case RISCV::PseudoCCALLIndirectSentryFP:
     return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, true);
   case RISCV::PseudoCCALLIndirectSentry:
@@ -627,6 +635,68 @@ bool RISCVExpandPseudo::expandPseudoClearRegs(MachineBasicBlock &MBB,
       }
     }
   }
+  MI.eraseFromParent();
+  return true;
+}
+
+bool RISCVExpandPseudo::expandPseudoConditionalReplenishReserveStack(
+    MachineBasicBlock &MBB,
+    MachineBasicBlock::iterator MBBI,
+    MachineBasicBlock::iterator &NextMBBI) {
+  MachineFunction *MF = MBB.getParent();
+  const auto &STI = MBB.getParent()->getSubtarget<RISCVSubtarget>();
+  MachineInstr &MI = *MBBI;
+  auto DL = MI.getDebugLoc();
+  Register ThresholdReg = MI.getOperand(0).getReg();
+  Register StackSpaceReg = MI.getOperand(1).getReg();
+  Register StackReg = RISCV::C2;
+
+  bool hasUninitIsentryCC =
+      MF->getFunction().getCallingConv() == CallingConv::CHERI_Uninit
+      && STI.getCHERIUninitEncap() == RISCVSubtarget::isentry;
+
+  MachineBasicBlock *EndReplenishMBB = MF->CreateMachineBasicBlock(MBB.getBasicBlock());
+
+  // Tell AsmPrinter that we unconditionally want the symbol of this label to be
+  // emitted.
+  EndReplenishMBB->setLabelMustBeEmitted();
+
+  MF->insert(++MBB.getIterator(), EndReplenishMBB);
+
+  // Move all the rest of the instructions to NewMBB.
+  EndReplenishMBB->splice(EndReplenishMBB->end(), &MBB, std::next(MBBI), MBB.end());
+  // Update machine-CFG edges.
+  EndReplenishMBB->transferSuccessorsAndUpdatePHIs(&MBB);
+  // Make the original basic block fall-through to the new.
+  MBB.addSuccessor(EndReplenishMBB);
+
+  // Make sure live-ins are correctly attached to this new basic block.
+  LivePhysRegs LiveRegs;
+  computeAndAddLiveIns(LiveRegs, *EndReplenishMBB);
+
+  // bge r_thr, r_st, end_replenish
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::BGE))
+  .addReg(StackSpaceReg)
+  .addReg(ThresholdReg)
+  .addMBB(EndReplenishMBB);
+    
+  // With indirect sentry, stack capability itself is sealed and used as return cap.
+  if (!hasUninitIsentryCC){
+    // usc csp, csp, csp
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::USC_CAP), StackReg)
+        .addReg(StackReg)
+        .addReg(StackReg);
+  }
+  // usc csp, cra, csp
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::USC_CAP), StackReg)
+      .addReg(RISCV::C1)
+      .addReg(StackReg);
+
+  // ccall __replenish_entry
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCCALL))
+      .addExternalSymbol(hasUninitIsentryCC ? "__replenish_entry_isentry" : "__replenish_entry");
+
+  NextMBBI = MBB.end();
   MI.eraseFromParent();
   return true;
 }

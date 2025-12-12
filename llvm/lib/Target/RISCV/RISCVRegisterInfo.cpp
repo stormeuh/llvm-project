@@ -75,7 +75,6 @@ RISCVRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     return CSR_ILP32_LP64_SaveList;
   case RISCVABI::ABI_IL32PC64:
   case RISCVABI::ABI_L64PC128:
-  case RISCVABI::ABI_L64PCU128:
     return CSR_IL32PC64_L64PC128_SaveList;
   case RISCVABI::ABI_ILP32F:
   case RISCVABI::ABI_LP64F:
@@ -101,6 +100,12 @@ BitVector RISCVRegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   for (size_t Reg = 0; Reg < getNumRegs(); Reg++) {
     if (STI.isRegisterReservedByUser(Reg))
       markSuperRegs(Reserved, Reg);
+  }
+
+  // mark reserve stack register as reserved
+  if (STI.hasReserveStack()){
+    markSuperRegs(Reserved, RISCV::X31);
+    markSuperRegs(Reserved, RISCV::C31);
   }
 
   // Use markSuperRegs to ensure any register aliases are also reserved
@@ -358,7 +363,6 @@ RISCVRegisterInfo::getCallPreservedMask(const MachineFunction & MF,
     return CSR_ILP32_LP64_RegMask;
   case RISCVABI::ABI_IL32PC64:
   case RISCVABI::ABI_L64PC128:
-  case RISCVABI::ABI_L64PCU128:
     return CSR_IL32PC64_L64PC128_RegMask;
   case RISCVABI::ABI_ILP32F:
   case RISCVABI::ABI_LP64F:

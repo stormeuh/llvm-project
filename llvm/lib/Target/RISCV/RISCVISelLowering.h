@@ -347,6 +347,8 @@ enum NodeType : unsigned {
   CLEAR_REGS,
   // Shrink the stack cap
   CAP_SHRINK_STACK,
+  // Shrink the reserve stack cap
+  CAP_SHRINK_RESERVE_STACK,
   // Return with CInvokeLAL instead of cret
   RET_FLAG_INDIRECT,
   // Store a value to the uninit stack

@@ -377,7 +377,6 @@ enum ABI {
   ABI_L64PC128,
   ABI_L64PC128F,
   ABI_L64PC128D,
-  ABI_L64PCU128,
   ABI_Unknown
 };
 
@@ -408,19 +407,9 @@ inline static bool isCheriPureCapABI(ABI TargetABI) {
   case ABI_L64PC128:
   case ABI_L64PC128F:
   case ABI_L64PC128D:
-  case ABI_L64PCU128:
     return true;
   default:
     llvm_unreachable("Improperly initialised target ABI");
-  }
-}
-
-inline static bool isUninitABI(ABI TargetABI) {
-  switch (TargetABI) {
-    case ABI_L64PCU128:
-      return true;
-    default:
-      return false;
   }
 }
 
