@@ -490,8 +490,8 @@ void RISCVFrameLowering::deriveFromUninitStackCap(
       FrameSize += MFI.getObjectSize(ObjIdx);
     }
   }
-  if (MFI.hasVAStart()) 
-    FrameSize += 256; // add an error margin if va_start is called
+  // if (MFI.hasVAStart()) 
+  //   FrameSize += 256; // add an error margin if va_start is called
   FrameSize = alignTo(FrameSize, StackAlign);
   MachineInstrBuilder CSetBoundsBuilder;
   MachineInstrBuilder CIncOffsetBuilder;

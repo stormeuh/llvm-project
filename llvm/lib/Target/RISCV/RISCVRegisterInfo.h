@@ -69,6 +69,8 @@ struct RISCVRegisterInfo : public RISCVGenRegisterInfo {
                         SmallVectorImpl<uint64_t> &Ops) const override;
 
   unsigned getRegisterCostTableIndex(const MachineFunction &MF) const override;
+
+  bool requiresRegisterClearing(void) const;
 };
 }
 

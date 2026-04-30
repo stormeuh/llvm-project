@@ -225,37 +225,37 @@ RISCVSubtarget::CHERIUninitEncapOpts RISCVSubtarget::getCHERIUninitEncap() const
   return CHERIUninitReturnEncap;
 }
 
-static cl::opt<RISCVSubtarget::CHERIStackType> CHERIStackTypeOpt(
-    "cheri-stack-type", cl::desc("Type of stack capability to expect."),
-    cl::init(RISCVSubtarget::CHERIStackDefault),
+static cl::opt<RISCVSubtarget::CHERIStackRevocation> CHERIStackRevocationOpt(
+    "cheri-stack-revocation", cl::desc("Type of stack revocation to expect."),
+    cl::init(RISCVSubtarget::CHERIStackNoRevocation),
     cl::values(
-        clEnumValN(RISCVSubtarget::CHERIStackDefault, "default",
-                   "Standard CHERI purecap stack"),
+        clEnumValN(RISCVSubtarget::CHERIStackNoRevocation, "none",
+                   "No stack revocation."),
         clEnumValN(RISCVSubtarget::CHERIStackUninit, "uninit",
                    "Uninitialized stack capability"),
         clEnumValN(RISCVSubtarget::CHERIStackUninitReserve, "uninitreserve",
                    "Uninitialized stack capability with reserve stack")));
 
-RISCVSubtarget::CHERIStackType RISCVSubtarget::getCHERIStackType() const {
-  return CHERIStackTypeOpt;
+RISCVSubtarget::CHERIStackRevocation RISCVSubtarget::getCHERIStackRevocation() const {
+  return CHERIStackRevocationOpt;
 }
 
 bool RISCVSubtarget::hasUninitStack() const {
-  switch (getCHERIStackType()) {
+  switch (getCHERIStackRevocation()) {
   case RISCVSubtarget::CHERIStackUninit:
   case RISCVSubtarget::CHERIStackUninitReserve:
     return true;
-  case RISCVSubtarget::CHERIStackDefault:
+  case RISCVSubtarget::CHERIStackNoRevocation:
     return false;
   }
 }
 
 bool RISCVSubtarget::hasReserveStack() const {
-  switch (getCHERIStackType()) {
+  switch (getCHERIStackRevocation()) {
   case RISCVSubtarget::CHERIStackUninitReserve:
     return true;
   case RISCVSubtarget::CHERIStackUninit:
-  case RISCVSubtarget::CHERIStackDefault:
+  case RISCVSubtarget::CHERIStackNoRevocation:
     return false;
   }
 }

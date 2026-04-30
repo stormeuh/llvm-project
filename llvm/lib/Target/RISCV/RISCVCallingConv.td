@@ -41,6 +41,8 @@ def CSR_NoRegs : CalleeSavedRegs<(add)>;
 
 def CSR_CHERI_Uninit : CalleeSavedRegs<(add X1, C1)>;
 
+def CSR_CHERI_Reduced : CalleeSavedRegs<(add X1, C1, X8, C8, X9, C9)>;
+
 // Interrupt handler needs to save/restore all registers that are used,
 // both Caller and Callee saved registers.
 def CSR_Interrupt : CalleeSavedRegs<(add X1,

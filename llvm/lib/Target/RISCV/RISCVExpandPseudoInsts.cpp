@@ -694,7 +694,10 @@ bool RISCVExpandPseudo::expandPseudoConditionalReplenishReserveStack(
 
   // ccall __replenish_entry
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCCALL))
-      .addExternalSymbol(hasUninitIsentryCC ? "__replenish_entry_isentry" : "__replenish_entry");
+      .addExternalSymbol(
+        hasUninitIsentryCC ? "__replenish_entry_isentry" : "__replenish_entry",
+        RISCVII::MO_CCALL
+      );
 
   NextMBBI = MBB.end();
   MI.eraseFromParent();

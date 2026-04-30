@@ -73,19 +73,14 @@ static cl::opt<bool>
                                   cl::init(false), cl::Hidden);
 
 static cl::opt<bool>
-    CHERIUninitClearRegs("cheri-uninit-clear-regs",
-    cl::desc("Clear registers upon call and return for uninit CC"),
-    cl::init(true));
-
-static cl::opt<bool>
     CHERIUninitStackSplit("cheri-uninit-stack-split",
     cl::desc("Split stack on caller-callee boundary upon call for uninit CC"),
     cl::init(true));
 
-static cl::opt<unsigned> CHERIUninitStackAlignment(
-    "cheri-uninit-stack-alignment",
-    cl::desc("Alignment of the stack required on secure calls (in powers of 2, default: 13)"),
-    cl::init(13));
+static cl::opt<bool> CHERIInstrumentSecureCalls(
+    "cheri-instrument-secure-calls",
+    cl::desc("Count number of secure calls made during execution"), cl::init(false));
+
 
 RISCVTargetLowering::RISCVTargetLowering(const TargetMachine &TM,
                                          const RISCVSubtarget &STI)
@@ -10805,22 +10800,27 @@ emitUninitShrinkReserveStack(MachineInstr &MI, MachineBasicBlock *BB,
 
   Register StackReg = RISCV::C2;
   Register ReserveStackReg = RISCV::C31;
-  Register CapTempReg = RegInfo.createVirtualRegister(&RISCV::GPCRRegClass);
-  Register IntTempReg = RegInfo.createVirtualRegister(&RISCV::GPRRegClass);
 
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CClearTag), CapTempReg)
+  Register UntaggedReserveReg = RegInfo.createVirtualRegister(&RISCV::GPCRRegClass);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CClearTag), UntaggedReserveReg)
       .addReg(ReserveStackReg);
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CGetBase), IntTempReg)
+
+  Register StackBaseReg = RegInfo.createVirtualRegister(&RISCV::GPRRegClass);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CGetBase), StackBaseReg)
       .addReg(StackReg);
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetAddr), CapTempReg)
-      .addReg(CapTempReg)
-      .addReg(IntTempReg);
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CShrinkImm), CapTempReg)
-      .addReg(CapTempReg)
+
+  Register AddrSetReserveReg = RegInfo.createVirtualRegister(&RISCV::GPCRRegClass);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetAddr), AddrSetReserveReg)
+      .addReg(UntaggedReserveReg)
+      .addReg(StackBaseReg);
+  
+  Register FinalUntaggedReserveReg = RegInfo.createVirtualRegister(&RISCV::GPCRRegClass);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CShrinkImm), FinalUntaggedReserveReg)
+      .addReg(AddrSetReserveReg)
       .addImm(0);
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::CBuildCap), ReserveStackReg)
       .addReg(ReserveStackReg)
-      .addReg(CapTempReg);
+      .addReg(FinalUntaggedReserveReg);
 
   MI.eraseFromParent();
   return BB;
@@ -12015,6 +12015,34 @@ static Align getPrefTypeAlign(EVT VT, SelectionDAG &DAG) {
       VT.getTypeForEVT(*DAG.getContext()));
 }
 
+static SDValue EmitIncrementSecureCallInstrumentation(MachineFunction &MF, SelectionDAG &DAG, SDLoc &DL, EVT PtrVT, SDValue Chain) {
+  Module *M = MF.getFunction().getParent();
+  EVT ValVT = MVT::i64;
+
+  GlobalVariable *GV = dyn_cast_or_null<GlobalVariable>(
+    M->getNamedGlobal("_uninit_call_count"));
+
+  if (!GV) {
+    GV = new GlobalVariable(
+        *M,
+        Type::getInt64Ty(M->getContext()),   // type
+        false,                    // isConstant
+        GlobalValue::ExternalLinkage,
+        nullptr,                  // no initializer = external declaration
+        "_uninit_call_count");
+  }
+
+  SDValue Ptr = DAG.getGlobalAddress(GV, DL, PtrVT);
+  SDValue Load = DAG.getLoad(ValVT, DL, Chain, Ptr,
+                             MachinePointerInfo(GV));
+  SDValue One = DAG.getConstant(1, DL, ValVT);
+  SDValue Add = DAG.getNode(ISD::ADD, DL, ValVT, Load, One);
+  SDValue Store = DAG.getStore(Load.getValue(1), DL, Add, Ptr,
+                               MachinePointerInfo(GV));
+
+  return Store;
+}
+
 // Lower a call to a callseq_start + CALL + callseq_end chain, and add input
 // and output parameter nodes.
 SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
@@ -12238,6 +12266,10 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   }
 
   if (IsVarArg && (Subtarget.hasUninitStack() || Subtarget.hasReserveStack())) {
+    if (!StackPtr.getNode())
+      StackPtr = DAG.getCopyFromReg(
+          Chain, DL, getStackPointerRegisterToSaveRestore(), PtrVT);
+
     // align to 16 byte boundary
     StackPassedArgStructSize += 16 - (StackPassedArgStructSize % 16);
     SDValue StackPassedArgStructPtr = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, DL, PtrVT, {
@@ -12254,6 +12286,9 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   // Join the stores, which are independent of one another.
   if (!MemOpChains.empty())
     Chain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, MemOpChains);
+
+  if (CallConv == CallingConv::CHERI_Uninit && CHERIInstrumentSecureCalls)
+    Chain = EmitIncrementSecureCallInstrumentation(MF, DAG, DL, PtrVT, Chain);
 
   SDValue Glue;
 
@@ -12326,19 +12361,9 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
       Callee = DAG.getTargetExternalFunctionSymbol(S->getSymbol(), OpFlags);
   }
 
-  // Emit stack cap shrinking node
-  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitStackSplit) {
-    Chain = DAG.getNode(RISCVISD::CAP_SHRINK_STACK, DL, {MVT::Other, MVT::Glue}, {
-      Chain
-    , DAG.getConstant(0, DL, XLenVT)
-    , Glue
-    });
-    Glue = Chain.getValue(1);
-  }
-
-  const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
+  const RISCVRegisterInfo *TRI = Subtarget.getRegisterInfo();
   // Emit register clearing node
-  if (CHERIUninitClearRegs && CallConv == CallingConv::CHERI_Uninit) {
+  if(TRI->requiresRegisterClearing() && CallConv == CallingConv::CHERI_Uninit) {
     SmallVector<SDValue, 8> Ops;
     uint32_t ClearMask = CalculateCapClearMask(GetCallReservedRegs(MF, TRI, ArgLocs));
     Ops.push_back(Chain);
@@ -12346,6 +12371,16 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     if (Glue.getNode()) Ops.push_back(Glue);
     SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
     Chain = DAG.getNode(RISCVISD::CLEAR_REGS, DL, NodeTys, Ops);
+    Glue = Chain.getValue(1);
+  }
+
+    // Emit stack cap shrinking node
+  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitStackSplit) {
+    Chain = DAG.getNode(RISCVISD::CAP_SHRINK_STACK, DL, {MVT::Other, MVT::Glue}, {
+      Chain
+    , DAG.getConstant(0, DL, XLenVT)
+    , Glue
+    });
     Glue = Chain.getValue(1);
   }
 
@@ -12402,11 +12437,6 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   DAG.addNoMergeSiteInfo(Chain.getNode(), CLI.NoMerge);
   Glue = Chain.getValue(1);
 
-  if(ReserveStackSpillSlot.getNode()) {
-    Chain = DAG.getCopyToReg(Chain, DL, RISCV::C31, ReserveStackSpillSlot, Glue);
-    Glue = Chain.getValue(1);
-  }
-
   // Mark the end of the call, which is glued to the call itself.
   Chain = DAG.getCALLSEQ_END(Chain,
                              DAG.getIntPtrConstant(NumBytes, DL, true),
@@ -12441,6 +12471,14 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     RetValue = convertLocVTToValVT(DAG, RetValue, VA, DL, Subtarget);
 
     InVals.push_back(RetValue);
+  }
+
+  if(ReserveStackSpillSlot.getNode()) {
+    SDValue SpilledReserveStackReg = DAG.getLoad(
+        PtrVT, DL, Chain, ReserveStackSpillSlot, MachinePointerInfo());
+    Chain = SpilledReserveStackReg.getValue(1);
+    Chain =
+        DAG.getCopyToReg(Chain, DL, RISCV::C31, SpilledReserveStackReg);
   }
 
   return Chain;
@@ -12539,8 +12577,9 @@ RISCVTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
     }
   }
 
-  if(CHERIUninitClearRegs && CallConv == CallingConv::CHERI_Uninit) {
-    const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
+  const RISCVRegisterInfo *TRI = Subtarget.getRegisterInfo();
+  // Emit register clearing node
+  if(TRI->requiresRegisterClearing() && CallConv == CallingConv::CHERI_Uninit) {
     SmallVector<SDValue, 3> CROps;
     uint32_t ClearMask = CalculateCapClearMask(GetCallReservedRegs(MF, TRI, RVLocs));
     CROps.push_back(Chain);

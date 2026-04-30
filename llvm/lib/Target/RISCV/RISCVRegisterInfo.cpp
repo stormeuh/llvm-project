@@ -43,6 +43,21 @@ static_assert(RISCV::F31_D == RISCV::F0_D + 31,
 static_assert(RISCV::V1 == RISCV::V0 + 1, "Register list not consecutive");
 static_assert(RISCV::V31 == RISCV::V0 + 31, "Register list not consecutive");
 
+static cl::opt<bool>
+    CHERIUninitClearRegs("cheri-uninit-clear-regs",
+    cl::desc("Clear registers upon call and return for uninit CC"),
+    cl::init(true));
+
+bool RISCVRegisterInfo::requiresRegisterClearing() const {
+  return CHERIUninitClearRegs;
+}
+
+static cl::opt<bool> CHERIUninitReduceCalleeSavedRegs(
+    "cheri-uninit-reduce-callee-saved-regs",
+    cl::desc("Use smaller set (see RISCVRegisterInfo.cpp for what set) of "
+             "callee-saved registers to save on register clearing cost."),
+    cl::init(false));
+
 RISCVRegisterInfo::RISCVRegisterInfo(const RISCVSubtarget &STI)
     : RISCVGenRegisterInfo(RISCVABI::isCheriPureCapABI(STI.getTargetABI())
                                ? RISCV::C1 : RISCV::X1,
@@ -54,8 +69,12 @@ RISCVRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   auto &Subtarget = MF->getSubtarget<RISCVSubtarget>();
   if (MF->getFunction().getCallingConv() == CallingConv::GHC)
     return CSR_NoRegs_SaveList;
-  if (MF->getFunction().getCallingConv() == CallingConv::CHERI_Uninit)
+  // Secure calling convention clears registers before call and return
+  if (MF->getFunction().getCallingConv() == CallingConv::CHERI_Uninit &&
+      this->requiresRegisterClearing())
     return CSR_CHERI_Uninit_SaveList;
+  // Reduce CSR set for regular call to reduce clearing cost
+  if (CHERIUninitReduceCalleeSavedRegs) return CSR_CHERI_Reduced_SaveList;
   if (MF->getFunction().hasFnAttribute("interrupt")) {
     if (Subtarget.hasStdExtD())
       return Subtarget.hasCheri() ? CSR_XLEN_CLEN_F64_Interrupt_SaveList
@@ -353,8 +372,9 @@ RISCVRegisterInfo::getCallPreservedMask(const MachineFunction & MF,
 
   if (CC == CallingConv::GHC)
     return CSR_NoRegs_RegMask;
-  if (CC == CallingConv::CHERI_Uninit)
+  if (CC == CallingConv::CHERI_Uninit && requiresRegisterClearing())
     return CSR_CHERI_Uninit_RegMask;
+  if (CHERIUninitReduceCalleeSavedRegs) return CSR_CHERI_Reduced_RegMask;
   switch (Subtarget.getTargetABI()) {
   default:
     llvm_unreachable("Unrecognized ABI");
