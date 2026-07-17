@@ -26,6 +26,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/Register.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/MC/MCDwarf.h"
 
@@ -37,6 +38,12 @@ using namespace llvm;
 static cl::opt<bool> CHERIUninitClearCalleeStack(
     "cheri-uninit-clear-callee-stack",
     cl::desc("Clear callee stack upon return in uninit ABI"), cl::init(true));
+
+static cl::opt<bool> CHERIUninitSanitizeArgs(
+  "cheri-sanitize-args",
+  cl::desc("Sanitize arguments in prologue of securely called functions"),
+  cl::init(false)
+);
 
 // For now we use x18, a.k.a s2, as pointer to shadow call stack.
 // User should explicitly set -ffixed-x18 and not use x18 in their asm.
@@ -646,6 +653,34 @@ void RISCVFrameLowering::emitReplenishCheck(MachineFunction &MF, MachineBasicBlo
   return;
 }
 
+void RISCVFrameLowering::emitArgumentSanitization(
+    MachineFunction &MF, MachineBasicBlock &MBB,
+    MachineBasicBlock::iterator MBBI, const DebugLoc &DL) const {
+  auto Flag = MachineInstr::FrameSetup;
+  const RISCVInstrInfo *TII = STI.getInstrInfo();
+  Register ArgRegMaskRegister = RISCV::X30;
+  
+  // calculate register mask indicating registers populated with arguments
+  unsigned ArgRegMask = 0;
+  for (const auto &LI : MF.getRegInfo().liveins()) {
+    Register ArgReg = LI.first;
+    if (ArgReg >= RISCV::X10 && ArgReg <= RISCV::X17) // a0..a7 
+      ArgRegMask |= (1u << (ArgReg - RISCV::X10));
+    else if (ArgReg >= RISCV::C10 && ArgReg <= RISCV::C17) // ca0..ca7
+      ArgRegMask |= (1u << (ArgReg - RISCV::C10));
+  }
+
+  if (ArgRegMask == 0)
+    return; // early exit if no arguments
+
+  // put mask in designated register
+  TII->movImm(MBB, MBBI, DL, ArgRegMaskRegister, ArgRegMask, Flag);
+
+  // call sanitization procedure
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCCALL))
+      .addExternalSymbol("__sanitize_passthrough_args",RISCVII::MO_CCALL);
+}
+
 void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
                                       MachineBasicBlock &MBB) const {
   MachineFrameInfo &MFI = MF.getFrameInfo();
@@ -662,10 +697,17 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
   // to determine the end of the prologue.
   DebugLoc DL;
 
-  // All calls are tail calls in GHC calling conv, and functions have no
-  // prologue/epilogue.
-  if (MF.getFunction().getCallingConv() == CallingConv::GHC)
-    return;
+  switch (MF.getFunction().getCallingConv()) {
+    // All calls are tail calls in GHC calling conv, and functions have no
+    // prologue/epilogue.
+    case CallingConv::GHC:
+      return;
+    // Functions called with secure calling convention must do argument 
+    // sanitization (if enabled with console arg)
+    case CallingConv::CHERI_Uninit:
+      if (CHERIUninitSanitizeArgs)
+        emitArgumentSanitization(MF, MBB, MBBI, DL);
+  }
 
   // Emit prologue for shadow call stack.
   emitSCSPrologue(MF, MBB, MBBI, DL);

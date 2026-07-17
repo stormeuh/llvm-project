@@ -107,6 +107,9 @@ private:
   void emitReplenishCheck(MachineFunction &MF, MachineBasicBlock &MBB,
                           MachineBasicBlock::iterator MI,
                           const DebugLoc &DL) const;
+  void emitArgumentSanitization(MachineFunction &MF, MachineBasicBlock &MBB,
+                                MachineBasicBlock::iterator MBBI,
+                                const DebugLoc &DL) const;
 };
 } // namespace llvm
 #endif
