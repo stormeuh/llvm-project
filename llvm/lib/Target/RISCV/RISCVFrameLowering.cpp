@@ -658,8 +658,15 @@ void RISCVFrameLowering::emitArgumentSanitization(
     MachineBasicBlock::iterator MBBI, const DebugLoc &DL) const {
   auto Flag = MachineInstr::FrameSetup;
   const RISCVInstrInfo *TII = STI.getInstrInfo();
+
+  Register ReturnCapReg = RISCV::C1;
   Register ArgRegMaskRegister = RISCV::X30;
   
+  // spill return cap
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::USC_CAP), getSPReg())
+      .addReg(ReturnCapReg)
+      .addReg(getSPReg());
+
   // calculate register mask indicating registers populated with arguments
   unsigned ArgRegMask = 0;
   for (const auto &LI : MF.getRegInfo().liveins()) {
@@ -679,6 +686,14 @@ void RISCVFrameLowering::emitArgumentSanitization(
   // call sanitization procedure
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCCALL))
       .addExternalSymbol("__sanitize_passthrough_args",RISCVII::MO_CCALL);
+
+  // restore return cap (and restore SP offset)
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), ReturnCapReg)
+    .addReg(getSPReg())
+    .addImm(0);
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), getSPReg())
+    .addReg(getSPReg())
+    .addImm(16);
 }
 
 void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
