@@ -26,7 +26,9 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/Register.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/IR/CallingConv.h"
+#include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/MC/MCDwarf.h"
 
@@ -712,16 +714,10 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
   // to determine the end of the prologue.
   DebugLoc DL;
 
-  switch (MF.getFunction().getCallingConv()) {
+  if (MF.getFunction().getCallingConv() == CallingConv::GHC) {
     // All calls are tail calls in GHC calling conv, and functions have no
     // prologue/epilogue.
-    case CallingConv::GHC:
       return;
-    // Functions called with secure calling convention must do argument 
-    // sanitization (if enabled with console arg)
-    case CallingConv::CHERI_Uninit:
-      if (CHERIUninitSanitizeArgs)
-        emitArgumentSanitization(MF, MBB, MBBI, DL);
   }
 
   // Emit prologue for shadow call stack.
@@ -788,8 +784,12 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
     RealStackSize = FirstSPAdjustAmount;
   }
 
+  MachineBasicBlock::iterator FirstFrameAllocI = MBBI;
+  FirstFrameAllocI--; // set iterator just before first frame alloc instruction
+
   // Allocate space on the stack if necessary.
   adjustReg(MBB, MBBI, DL, SPReg, SPReg, -StackSize, MachineInstr::FrameSetup);
+  assert(!STI.hasUninitStack() || std::next(FirstFrameAllocI)->getOpcode() == RISCV::USC_CAP);
 
   // Emit ".cfi_def_cfa_offset RealStackSize"
   unsigned CFIIndex = MF.addFrameInst(
@@ -806,7 +806,10 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
   // to the stack, not before.
   // FIXME: assumes exactly one instruction is used to save each callee-saved
   // register.
-  std::advance(MBBI, getNonLibcallCSI(MF, CSI).size());
+  //
+  // This step is not necessary for Uninit, stack allocation insts will be modified
+  // to also spill registers in next step.
+  if (!STI.hasUninitStack()) std::advance(MBBI, getNonLibcallCSI(MF, CSI).size());
 
   // Iterate over list of callee-saved registers and emit .cfi_offset
   // directives.
@@ -826,6 +829,19 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
     BuildMI(MBB, MBBI, DL, TII->get(TargetOpcode::CFI_INSTRUCTION))
         .addCFIIndex(CFIIndex)
         .setMIFlag(MachineInstr::FrameSetup);
+
+    if (STI.hasUninitStack()) {
+      assert(FrameIdx >= 0 && "Unexpected libcall spill together with purecap uninit stack!");
+
+      MachineBasicBlock::iterator SpillAllocI = FirstFrameAllocI;
+      for (auto SpillOffset = Offset; SpillOffset < 0; SpillOffset += 16)
+        SpillAllocI++;
+      MachineInstr &SpillAlloc = *SpillAllocI;
+      assert(SpillAlloc.getOpcode() == RISCV::USC_CAP && "Unexpected opcode!");
+      assert(SpillAlloc.getOperand(1).isReg() && "Unexpected operand type!");
+      SpillAlloc.getOperand(1).setReg(Reg);
+      SpillAlloc.getOperand(1).setIsKill(!MBB.isLiveIn(Reg));
+    }
   }
 
   // Generate new FP.
@@ -1555,8 +1571,14 @@ bool RISCVFrameLowering::spillCalleeSavedRegisters(
     // Omitting the kill flags is conservatively correct even if the live-in is
     // not used after all.
     const TargetRegisterClass *RC = TRI->getMinimalPhysRegClass(Reg);
-    TII.storeRegToStackSlot(MBB, MI, Reg, !MBB.isLiveIn(Reg), CS.getFrameIdx(),
-                            RC, TRI);
+
+    if (STI.hasUninitStack() && RISCV::GPCRRegClass.hasSubClassEq(RC))
+      // When uninitialized stack capability is being used, skip emitting this store.
+      // emitPrologue will later emit these spills as part of stack allocation
+      continue;
+    else
+      TII.storeRegToStackSlot(MBB, MI, Reg, !MBB.isLiveIn(Reg),
+                              CS.getFrameIdx(), RC, TRI);
   }
 
   return true;
