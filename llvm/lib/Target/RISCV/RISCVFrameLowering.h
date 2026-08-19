@@ -17,6 +17,7 @@
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/Support/TypeSize.h"
+#include <cstdint>
 
 namespace llvm {
 class RISCVSubtarget;
@@ -109,7 +110,8 @@ private:
                           const DebugLoc &DL) const;
   void emitArgumentSanitization(MachineFunction &MF, MachineBasicBlock &MBB,
                                 MachineBasicBlock::iterator MBBI,
-                                const DebugLoc &DL) const;
+                                const DebugLoc &DL,
+                                uint64_t FramePointerOffset) const;
 };
 } // namespace llvm
 #endif

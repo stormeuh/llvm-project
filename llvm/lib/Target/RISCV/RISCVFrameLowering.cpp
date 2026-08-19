@@ -483,7 +483,7 @@ void RISCVFrameLowering::deriveFromUninitStackCap(
     MachineInstr::MIFlag Flag) const {
   assert(Amount >= 0 &&
          "Attempting to derive cap from stack cap with negative offset!");
-  assert(TargetReg == getFPReg() && "temp safeguard, target has to be fp");
+  assert(TargetReg == getFPReg() || TargetReg == RISCV::C18 && "temp safeguard, target has to be fp");
   const RISCVInstrInfo *TII = STI.getInstrInfo();
   const MachineFrameInfo &MFI = MBB.getParent()->getFrameInfo();
   const Align StackAlign = MFI.getMaxAlign();
@@ -657,45 +657,35 @@ void RISCVFrameLowering::emitReplenishCheck(MachineFunction &MF, MachineBasicBlo
 
 void RISCVFrameLowering::emitArgumentSanitization(
     MachineFunction &MF, MachineBasicBlock &MBB,
-    MachineBasicBlock::iterator MBBI, const DebugLoc &DL) const {
-  auto Flag = MachineInstr::FrameSetup;
+    MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
+    uint64_t FramePointerOffset) const {
   const RISCVInstrInfo *TII = STI.getInstrInfo();
 
-  Register ReturnCapReg = RISCV::C1;
-  Register ArgRegMaskRegister = RISCV::X30;
-  
-  // spill return cap
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::USC_CAP), getSPReg())
-      .addReg(ReturnCapReg)
-      .addReg(getSPReg());
-
-  // calculate register mask indicating registers populated with arguments
-  unsigned ArgRegMask = 0;
+  bool HasArguments = false;
   for (const auto &LI : MF.getRegInfo().liveins()) {
     Register ArgReg = LI.first;
-    if (ArgReg >= RISCV::X10 && ArgReg <= RISCV::X17) // a0..a7 
-      ArgRegMask |= (1u << (ArgReg - RISCV::X10));
-    else if (ArgReg >= RISCV::C10 && ArgReg <= RISCV::C17) // ca0..ca7
-      ArgRegMask |= (1u << (ArgReg - RISCV::C10));
+    if ((ArgReg >= RISCV::X10 && ArgReg <= RISCV::X17) || // a0..a7
+        (ArgReg >= RISCV::C10 && ArgReg <= RISCV::C17)) { // ca0..ca7
+      HasArguments = true;
+      break;
+    }
   }
 
-  if (ArgRegMask == 0)
+  if (!HasArguments)
     return; // early exit if no arguments
 
-  // put mask in designated register
-  TII->movImm(MBB, MBBI, DL, ArgRegMaskRegister, ArgRegMask, Flag);
+  if (!hasFP(MF)) {
+    assert(isInt<12>(FramePointerOffset));
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI),
+            getFPReg() - RISCV::C0 + RISCV::X0)
+        .addReg(getSPReg() - RISCV::C0 + RISCV::X0)
+        .addImm(FramePointerOffset);
+  }
 
   // call sanitization procedure
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCCALL))
-      .addExternalSymbol("__sanitize_passthrough_args",RISCVII::MO_CCALL);
-
-  // restore return cap (and restore SP offset)
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), ReturnCapReg)
-    .addReg(getSPReg())
-    .addImm(0);
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CIncOffsetImm), getSPReg())
-    .addReg(getSPReg())
-    .addImm(16);
+      .addExternalSymbol("__sanitize_passthrough_args", RISCVII::MO_CCALL)
+      .setMIFlag(MachineInstr::FrameSetup);
 }
 
 void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
@@ -789,7 +779,9 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
 
   // Allocate space on the stack if necessary.
   adjustReg(MBB, MBBI, DL, SPReg, SPReg, -StackSize, MachineInstr::FrameSetup);
-  assert(!STI.hasUninitStack() || std::next(FirstFrameAllocI)->getOpcode() == RISCV::USC_CAP);
+  assert(!STI.hasUninitStack()
+    || RealStackSize == 0
+    || std::next(FirstFrameAllocI)->getOpcode() == RISCV::USC_CAP);
 
   // Emit ".cfi_def_cfa_offset RealStackSize"
   unsigned CFIIndex = MF.addFrameInst(
@@ -860,6 +852,13 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
     BuildMI(MBB, MBBI, DL, TII->get(TargetOpcode::CFI_INSTRUCTION))
         .addCFIIndex(CFIIndex)
         .setMIFlag(MachineInstr::FrameSetup);
+  }
+
+  // Functions called with secure calling convention must do argument
+  // sanitization (if enabled with console arg)
+  if (MF.getFunction().getCallingConv() == CallingConv::CHERI_Uninit
+      && CHERIUninitSanitizeArgs){
+      emitArgumentSanitization(MF, MBB, MBBI, DL, RealStackSize - RVFI->getVarArgsSaveSize());
   }
 
   // Emit the second SP adjustment after saving callee saved registers.
