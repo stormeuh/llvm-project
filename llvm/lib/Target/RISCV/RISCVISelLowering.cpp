@@ -49,6 +49,7 @@
 #include "llvm/IR/IntrinsicsRISCV.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/MC/MCContext.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/KnownBits.h"
@@ -12359,6 +12360,29 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
                        /*CanDeriveFromPcc=*/true);
     else
       Callee = DAG.getTargetExternalFunctionSymbol(S->getSymbol(), OpFlags);
+  } else {
+    if(CallConv == CallingConv::CHERI_Uninit) {
+      // Calls to anything that is not a global or external symbol must be
+      // checked that their capability has the global permission.
+      SDValue Zero = DAG.getConstant(0, DL, XLenVT);
+      SDValue GlobalPermsMask = DAG.getConstant(0x0001, DL, XLenVT);
+      SDValue CalleeTagCleared = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, DL, PtrVT, {
+        DAG.getTargetConstant(Intrinsic::cheri_cap_tag_clear, DL, XLenVT),
+        Callee});
+
+      SDValue CalleePerms = DAG.getNode(ISD::INTRINSIC_WO_CHAIN, DL, XLenVT, {
+        DAG.getTargetConstant(Intrinsic::cheri_cap_perms_get, DL, XLenVT),
+        Callee});
+      SDValue CalleeGlobalMaskedPerms = DAG.getNode(ISD::AND, DL, XLenVT,
+          CalleePerms, GlobalPermsMask);
+      
+      Callee = DAG.getSelectCC(DL,
+        Zero, CalleeGlobalMaskedPerms,
+        CalleeTagCleared, // clear tag if not global
+        Callee, // 
+        ISD::SETEQ
+      );
+    }
   }
 
   const RISCVRegisterInfo *TRI = Subtarget.getRegisterInfo();
