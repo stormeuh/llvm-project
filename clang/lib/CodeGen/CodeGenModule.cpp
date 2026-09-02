@@ -2141,6 +2141,9 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
       B.addAttribute(llvm::Attribute::MinSize);
   }
 
+  if (D->hasAttr<LittleCHERINoArgsanAttr>())
+    B.addAttribute(llvm::Attribute::LittleCHERINoArgsan);
+
   F->addFnAttrs(B);
 
   unsigned alignment = D->getMaxAlignment() / Context.getCharWidth();

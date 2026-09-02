@@ -2362,6 +2362,13 @@ def CHERIUninit : DeclOrTypeAttr { // InheritableAttr {
   let Documentation = [CHERIUninitDocs];
 }
 
+/* Forego emitting argsan call in prologue of this function */
+def LittleCHERINoArgsan : DeclOrTypeAttr {
+  let Spellings = [GNU<"littlecheri_noargsan">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+}
+
 def CHERIMethodSuffix : DeclOrTypeAttr { // InheritableAttr {
   let Spellings = [GNU<"cheri_method_suffix">];
   let Documentation = [Undocumented];

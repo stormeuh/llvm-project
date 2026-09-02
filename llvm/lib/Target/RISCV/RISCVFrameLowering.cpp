@@ -856,8 +856,11 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
 
   // Functions called with secure calling convention must do argument
   // sanitization (if enabled with console arg)
-  if (MF.getFunction().getCallingConv() == CallingConv::CHERI_Uninit
-      && CHERIUninitSanitizeArgs){
+  if (//MF.getFunction().getCallingConv() == CallingConv::CHERI_Uninit &&
+        CHERIUninitSanitizeArgs
+      && MFI.hasCalls()
+      && !(MF.getFunction().hasFnAttribute(Attribute::LittleCHERINoArgsan))
+      ){
       emitArgumentSanitization(MF, MBB, MBBI, DL, RealStackSize - RVFI->getVarArgsSaveSize());
   }
 

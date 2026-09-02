@@ -129,6 +129,9 @@ def InReg : EnumAttr<"inreg", [ParamAttr, RetAttr]>;
 /// Build jump-instruction tables and replace refs.
 def JumpTable : EnumAttr<"jumptable", [FnAttr]>;
 
+/* Emit no argument sanitization in prologue of this function */
+def LittleCHERINoArgsan : EnumAttr<"littlecheri_noargsan", [FnAttr]>;
+
 /// Function must be optimized for size first.
 def MinSize : EnumAttr<"minsize", [FnAttr]>;
 
