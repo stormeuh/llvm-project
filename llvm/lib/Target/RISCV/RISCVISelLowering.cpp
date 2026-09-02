@@ -11959,6 +11959,10 @@ bool RISCVTargetLowering::isEligibleForTailCallOptimization(
   if (Caller.hasFnAttribute("interrupt"))
     return false;
 
+  // Tail calls are not supported by this secure calling convention
+  if (CalleeCC == CallingConv::CHERI_Uninit)
+    return false;
+
   // Do not tail call opt if the stack is used to pass parameters.
   if (CCInfo.getNextStackOffset() != 0)
     return false;
