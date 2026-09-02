@@ -58,6 +58,10 @@ static cl::opt<bool> CHERIUninitReduceCalleeSavedRegs(
              "callee-saved registers to save on register clearing cost."),
     cl::init(false));
 
+bool RISCVRegisterInfo::hasReducedCalleeSavedRegisters(void) const {
+  return CHERIUninitReduceCalleeSavedRegs;
+}
+
 RISCVRegisterInfo::RISCVRegisterInfo(const RISCVSubtarget &STI)
     : RISCVGenRegisterInfo(RISCVABI::isCheriPureCapABI(STI.getTargetABI())
                                ? RISCV::C1 : RISCV::X1,

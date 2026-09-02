@@ -71,6 +71,7 @@ struct RISCVRegisterInfo : public RISCVGenRegisterInfo {
   unsigned getRegisterCostTableIndex(const MachineFunction &MF) const override;
 
   bool requiresRegisterClearing(void) const;
+  bool hasReducedCalleeSavedRegisters(void) const;
 };
 }
 

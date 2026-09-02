@@ -298,13 +298,12 @@ public:
 
   CHERIUninitEncapOpts getCHERIUninitEncap() const;
   
-  enum CHERIStackRevocation {
-    CHERIStackNoRevocation,
-    CHERIStackUninit,
-    CHERIStackUninitReserve
+  enum LittleCHERIStackRevocation {
+    LittleCHERIStackNoRevocation,
+    LittleCHERIStackUninit
   };
 
-  CHERIStackRevocation getCHERIStackRevocation() const;
+  LittleCHERIStackRevocation getLittleCHERIStackRevocation() const;
 
   bool hasUninitStack() const;
   bool hasReserveStack() const;

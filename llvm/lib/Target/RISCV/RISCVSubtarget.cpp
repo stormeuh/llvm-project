@@ -225,37 +225,36 @@ RISCVSubtarget::CHERIUninitEncapOpts RISCVSubtarget::getCHERIUninitEncap() const
   return CHERIUninitReturnEncap;
 }
 
-static cl::opt<RISCVSubtarget::CHERIStackRevocation> CHERIStackRevocationOpt(
-    "cheri-stack-revocation", cl::desc("Type of stack revocation to expect."),
-    cl::init(RISCVSubtarget::CHERIStackNoRevocation),
+static cl::opt<RISCVSubtarget::LittleCHERIStackRevocation> LittleCHERIStackRevocationOpt(
+    "littlecheri-stack-revocation", cl::desc("Type of stack revocation to expect."),
+    cl::init(RISCVSubtarget::LittleCHERIStackNoRevocation),
     cl::values(
-        clEnumValN(RISCVSubtarget::CHERIStackNoRevocation, "none",
+        clEnumValN(RISCVSubtarget::LittleCHERIStackNoRevocation, "none",
                    "No stack revocation."),
-        clEnumValN(RISCVSubtarget::CHERIStackUninit, "uninit",
-                   "Uninitialized stack capability"),
-        clEnumValN(RISCVSubtarget::CHERIStackUninitReserve, "uninitreserve",
-                   "Uninitialized stack capability with reserve stack")));
+        clEnumValN(RISCVSubtarget::LittleCHERIStackUninit, "uninit",
+                   "Uninitialized stack capability")));
 
-RISCVSubtarget::CHERIStackRevocation RISCVSubtarget::getCHERIStackRevocation() const {
-  return CHERIStackRevocationOpt;
+RISCVSubtarget::LittleCHERIStackRevocation RISCVSubtarget::getLittleCHERIStackRevocation() const {
+  return LittleCHERIStackRevocationOpt;
 }
 
+static cl::opt<bool> LittleCHERIReserveStack(
+    "littlecheri-reserve-stack", cl::desc("Enable LittleCHERI reserve stack."),
+    cl::init(false));
+
+
 bool RISCVSubtarget::hasUninitStack() const {
-  switch (getCHERIStackRevocation()) {
-  case RISCVSubtarget::CHERIStackUninit:
-  case RISCVSubtarget::CHERIStackUninitReserve:
+  switch (getLittleCHERIStackRevocation()) {
+  case RISCVSubtarget::LittleCHERIStackUninit:
     return true;
-  case RISCVSubtarget::CHERIStackNoRevocation:
+  case RISCVSubtarget::LittleCHERIStackNoRevocation:
     return false;
   }
 }
 
 bool RISCVSubtarget::hasReserveStack() const {
-  switch (getCHERIStackRevocation()) {
-  case RISCVSubtarget::CHERIStackUninitReserve:
-    return true;
-  case RISCVSubtarget::CHERIStackUninit:
-  case RISCVSubtarget::CHERIStackNoRevocation:
-    return false;
+  if (LittleCHERIReserveStack && !hasUninitStack()) {
+    errs() << "Warning: reserve stack should be used only in conjunction with uninitialized stack!";
   }
+  return LittleCHERIReserveStack;
 }
