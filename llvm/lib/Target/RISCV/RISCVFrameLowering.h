@@ -112,6 +112,9 @@ private:
                                 MachineBasicBlock::iterator MBBI,
                                 const DebugLoc &DL,
                                 uint64_t FramePointerOffset) const;
+  void emitCheckStackLocal(MachineFunction &MF, MachineBasicBlock &MBB,
+                           MachineBasicBlock::iterator MBBI,
+                           const DebugLoc &DL) const;
 };
 } // namespace llvm
 #endif

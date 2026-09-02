@@ -655,6 +655,34 @@ void RISCVFrameLowering::emitReplenishCheck(MachineFunction &MF, MachineBasicBlo
   return;
 }
 
+void RISCVFrameLowering::emitCheckStackLocal(MachineFunction &MF,
+                                             MachineBasicBlock &MBB,
+                                             MachineBasicBlock::iterator MBBI,
+                                             const DebugLoc &DL) const {
+  auto Flag = MachineInstr::FrameSetup;
+  const RISCVInstrInfo *TII = STI.getInstrInfo();
+  MachineRegisterInfo &MRI = MBB.getParent()->getRegInfo();
+  Register PermsReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
+  Register MaskedPermReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
+
+  // get perms
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CGetPerm), PermsReg)
+      .addReg(getSPReg())
+      .setMIFlag(Flag);
+  // mask for global permission, global perm is in bit 0
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::ANDI), MaskedPermReg)
+      .addReg(PermsReg)
+      .addImm(0x0001)
+      .setMIFlag(Flag);
+  
+  // Clear tag if global bit is set
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoConditionalVoidStackTag))
+      .addReg(MaskedPermReg)
+      .setMIFlag(Flag);
+  
+  return;
+}
+
 void RISCVFrameLowering::emitArgumentSanitization(
     MachineFunction &MF, MachineBasicBlock &MBB,
     MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
@@ -708,6 +736,10 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
     // All calls are tail calls in GHC calling conv, and functions have no
     // prologue/epilogue.
       return;
+  } else if (MF.getFunction().getCallingConv() == CallingConv::CHERI_Uninit) {
+    // First check to do when getting control from adversary: check stack cap
+    // has local permission (i.e. is not global)
+    emitCheckStackLocal(MF, MBB, MBBI, DL);
   }
 
   // Emit prologue for shadow call stack.

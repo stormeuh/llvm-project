@@ -410,6 +410,9 @@ def PseudoCShrinkReserveStack : Pseudo<(outs), (ins), [(riscv_cap_shrink_reserve
 let hasSideEffects = 0, mayLoad = 0, mayStore = 1, isBranch = 1, Uses = [C1,C2], Defs = [C2], usesCustomInserter = 1 in
 def PseudoConditionalReplenishReserveStack : Pseudo<(outs), (ins GPR:$thr, GPR:$sts), []>;
 
+let hasSideEffects = 0, mayLoad = 0, mayStore = 0, isBranch = 1, Uses = [C2], Defs = [C2], usesCustomInserter = 1 in
+def PseudoConditionalVoidStackTag : Pseudo<(outs), (ins GPR:$thr), []>;
+
 }
 
 def : InstAlias<"cincoffsetimm $cd, $cs1, $imm",

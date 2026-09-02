@@ -98,6 +98,9 @@ private:
   bool expandPseudoConditionalReplenishReserveStack(MachineBasicBlock &MBB,
                                               MachineBasicBlock::iterator MBBI,
                                               MachineBasicBlock::iterator &NextMBBI);
+  bool expandPseudoConditionalVoidStackTag(MachineBasicBlock &MBB,
+                                           MachineBasicBlock::iterator MBBI,
+                                           MachineBasicBlock::iterator &NextMBBI);
 };
 
 char RISCVExpandPseudo::ID = 0;
@@ -136,6 +139,8 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
     return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, true);
   case RISCV::PseudoCCALLIndirectSentry:
     return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, false);
+  case RISCV::PseudoConditionalVoidStackTag:
+    return expandPseudoConditionalVoidStackTag(MBB, MBBI, NextMBBI);
   case RISCV::PseudoClearRegs:
     return expandPseudoClearRegs(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLLA:
@@ -595,6 +600,7 @@ bool RISCVExpandPseudo::expandPseudoCCALLIndirectSentry(MachineBasicBlock &MBB,
     TII->get(RISCV::PseudoCCALLCustomRA), MI.getOperand(0).getReg());
   JumpInst->addOperand(MI.getOperand(1));
   JumpInst->setPostInstrSymbol(*MF, MI.getPostInstrSymbol());
+  JumpInst->setFlag(MachineInstr::NoMerge);
   // add all other operands
   for (auto OpIdx = 2u; OpIdx < MI.getNumOperands(); OpIdx++)
     JumpInst->addOperand(MI.getOperand(OpIdx));
@@ -698,6 +704,47 @@ bool RISCVExpandPseudo::expandPseudoConditionalReplenishReserveStack(
         hasUninitIsentryCC ? "__replenish_entry_isentry" : "__replenish_entry",
         RISCVII::MO_CCALL
       );
+
+  NextMBBI = MBB.end();
+  MI.eraseFromParent();
+  return true;
+}
+
+bool RISCVExpandPseudo::expandPseudoConditionalVoidStackTag(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+    MachineBasicBlock::iterator &NextMBBI) {
+  MachineFunction *MF = MBB.getParent();
+  const auto &STI = MBB.getParent()->getSubtarget<RISCVSubtarget>();
+  MachineInstr &MI = *MBBI;
+  auto DL = MI.getDebugLoc();
+  Register ConditionReg = MI.getOperand(0).getReg();
+  Register StackReg = RISCV::C2;
+
+  // Create new basic block to jump over voiding tag
+  MachineBasicBlock *SkipVoidTagMBB = MF->CreateMachineBasicBlock(MBB.getBasicBlock());
+
+  // // Bookkeeping to make sure MBB is placed correctly
+  SkipVoidTagMBB->setLabelMustBeEmitted();
+  MF->insert(++MBB.getIterator(), SkipVoidTagMBB);
+  // Move all the rest of the instructions to NewMBB.
+  SkipVoidTagMBB->splice(SkipVoidTagMBB->end(), &MBB, std::next(MBBI), MBB.end());
+  // Update machine-CFG edges.
+  SkipVoidTagMBB->transferSuccessorsAndUpdatePHIs(&MBB);
+  // Make the original basic block fall-through to the new.
+  MBB.addSuccessor(SkipVoidTagMBB);
+  // Make sure live-ins are correctly attached to this new basic block.
+  LivePhysRegs LiveRegs;
+  computeAndAddLiveIns(LiveRegs, *SkipVoidTagMBB);
+
+  // if the condition is zero, do not clear tag
+  // beqz r_cond, skip_void_tag
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::BEQ))
+  .addReg(ConditionReg)
+  .addReg(RISCV::X0)
+  .addMBB(SkipVoidTagMBB);
+
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CClearTag), StackReg)
+    .addReg(StackReg);
 
   NextMBBI = MBB.end();
   MI.eraseFromParent();
