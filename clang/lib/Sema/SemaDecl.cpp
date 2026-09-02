@@ -30,6 +30,7 @@
 #include "clang/Basic/Builtins.h"
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Basic/Specifiers.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/HeaderSearch.h" // TODO: Sema shouldn't depend on Lex
 #include "clang/Lex/Lexer.h" // TODO: Extract static functions to fix layering.
@@ -3636,10 +3637,16 @@ bool Sema::MergeFunctionDecl(FunctionDecl *New, NamedDecl *&OldD, Scope *S,
       // Calling Conventions on a Builtin aren't really useful and setting a
       // default calling convention and cdecl'ing some builtin redeclarations is
       // common, so warn and ignore the calling convention on the redeclaration.
-      Diag(New->getLocation(), diag::warn_cconv_unsupported)
-          << FunctionType::getNameForCallConv(NewTypeInfo.getCC())
-          << (int)CallingConventionIgnoredReason::BuiltinFunction;
-      NewTypeInfo = NewTypeInfo.withCallingConv(OldTypeInfo.getCC());
+
+      // Allow override with LittleCHERI calling convention though
+      if (NewTypeInfo.getCC() == CC_CHERIUninit) {
+        OldTypeInfo = OldTypeInfo.withCallingConv(NewTypeInfo.getCC());
+      } else {
+        Diag(New->getLocation(), diag::warn_cconv_unsupported)
+            << FunctionType::getNameForCallConv(NewTypeInfo.getCC())
+            << (int)CallingConventionIgnoredReason::BuiltinFunction;
+        NewTypeInfo = NewTypeInfo.withCallingConv(OldTypeInfo.getCC());
+      }
       RequiresAdjustment = true;
     } else {
       // Calling conventions aren't compatible, so complain.
