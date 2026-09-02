@@ -688,21 +688,25 @@ void RISCVFrameLowering::emitArgumentSanitization(
     MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
     uint64_t FramePointerOffset) const {
   const RISCVInstrInfo *TII = STI.getInstrInfo();
+  const RISCVRegisterInfo *RI = STI.getRegisterInfo();
+  Register FPStashReg = RISCV::C20;
 
-  bool HasArguments = false;
-  for (const auto &LI : MF.getRegInfo().liveins()) {
-    Register ArgReg = LI.first;
-    if ((ArgReg >= RISCV::X10 && ArgReg <= RISCV::X17) || // a0..a7
-        (ArgReg >= RISCV::C10 && ArgReg <= RISCV::C17)) { // ca0..ca7
-      HasArguments = true;
-      break;
+  bool HasArguments = std::any_of(
+    MF.getRegInfo().liveins().begin(), MF.getRegInfo().liveins().end(),
+    [](const auto &LI) {
+      Register ArgReg = LI.first;
+      return ((ArgReg >= RISCV::X10 && ArgReg <= RISCV::X17) || // a0..a7
+              (ArgReg >= RISCV::C10 && ArgReg <= RISCV::C17)); // ca0..ca7
     }
-  }
+  );
 
   if (!HasArguments)
     return; // early exit if no arguments
 
   if (!hasFP(MF)) {
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CMove), FPStashReg)
+      .addReg(getFPReg());
+
     assert(isInt<12>(FramePointerOffset));
     BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI),
             getFPReg() - RISCV::C0 + RISCV::X0)
@@ -714,6 +718,10 @@ void RISCVFrameLowering::emitArgumentSanitization(
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCCALL))
       .addExternalSymbol("__sanitize_passthrough_args", RISCVII::MO_CCALL)
       .setMIFlag(MachineInstr::FrameSetup);
+
+  if (!hasFP(MF))
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CMove), getFPReg())
+      .addReg(FPStashReg);
 }
 
 void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
@@ -1251,6 +1259,8 @@ void RISCVFrameLowering::determineCalleeSaves(MachineFunction &MF,
                                               BitVector &SavedRegs,
                                               RegScavenger *RS) const {
   TargetFrameLowering::determineCalleeSaves(MF, SavedRegs, RS);
+  const RISCVRegisterInfo *RI = STI.getRegisterInfo();
+
   // Unconditionally spill RA and FP only if the function uses a frame
   // pointer.
   if (hasFP(MF)) {
@@ -1261,6 +1271,10 @@ void RISCVFrameLowering::determineCalleeSaves(MachineFunction &MF,
       SavedRegs.set(RISCV::X1);
       SavedRegs.set(RISCV::X8);
     }
+  } else if (CHERIUninitSanitizeArgs && !RI->hasReducedCalleeSavedRegisters()) {
+    // argsan always clobbers cfp, and if reduced CSR is not enabled, we must
+    // spill it
+    SavedRegs.set(RISCV::C8);
   }
   // Mark BP as used if function has dedicated base pointer.
   if (hasBP(MF))
