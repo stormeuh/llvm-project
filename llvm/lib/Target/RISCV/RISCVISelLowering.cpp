@@ -10705,7 +10705,11 @@ emitPseudoUCCALL(MachineInstr &MI, MachineBasicBlock *BB,
   MachineBasicBlock::iterator MBBI = std::next(MachineBasicBlock::iterator(MI));
   MachineFunction &MF = *BB->getParent();
   DebugLoc DL = MI.getDebugLoc();
+  const RISCVSubtarget &ST = MF.getSubtarget<RISCVSubtarget>();
+  const auto *TFL = ST.getFrameLowering();
   const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+  
+  Register ArgsanThresholdReg = ST.getRegisterInfo()->getLittleCHERIArgsanThresholdReg();
 
   // Registers
   // Register StackCapReg = RISCV::C2;
@@ -10714,7 +10718,7 @@ emitPseudoUCCALL(MachineInstr &MI, MachineBasicBlock *BB,
 
   int CallOpc; 
   if (Subtarget.getCHERIUninitEncap() == RISCVSubtarget::isentry)
-    if (RISCVGenRegisterInfo::getFrameLowering(MF)->hasFP(MF))
+    if (TFL->hasFP(MF))
       CallOpc = RISCV::PseudoCCALLIndirectSentryFP;
     else 
       CallOpc = RISCV::PseudoCCALLIndirectSentry;
@@ -10730,14 +10734,9 @@ emitPseudoUCCALL(MachineInstr &MI, MachineBasicBlock *BB,
   for (auto OpIdx = 2u; OpIdx < MI.getNumOperands(); OpIdx++)
     JumpInst->addOperand(MI.getOperand(OpIdx));
 
-  // Restore caller local state if isentry return encap is used
-  // if (CHERIUninitReturnEncap == isentry) {
-  //   BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), StackCapReg)
-  //     .addReg(IDC).addImm(16);
-  //   if (RISCVGenRegisterInfo::getFrameLowering(MF)->hasFP(MF))
-  //     BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), FrameCapReg)
-  //       .addReg(IDC).addImm(-16);
-  // }
+  // reset argsan threshold
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCGetAddr), ArgsanThresholdReg)
+      .addReg(TFL->getSPReg());
 
   // remove expanded pseudo-instruction
   MI.eraseFromParent();
@@ -12066,11 +12065,13 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   EVT PtrVT = getPointerTy(DAG.getDataLayout(),
   DAG.getDataLayout().getAllocaAddrSpace());
   MVT XLenVT = Subtarget.getXLenVT();
-  
+
   MachineFunction &MF = DAG.getMachineFunction();
   bool hasFramePointer = RISCVGenRegisterInfo::getFrameLowering(MF)->hasFP(MF);
   RISCVSubtarget::CHERIUninitEncapOpts CHERIUninitEncap = Subtarget.getCHERIUninitEncap();
   RISCVMachineFunctionInfo *RVFI = MF.getInfo<RISCVMachineFunctionInfo>();
+
+  if (CallConv == CallingConv::CHERI_Uninit) RVFI->setHasSecureCalls(true);
 
   // Analyze the operands of the call, assigning locations to each operand.
   SmallVector<CCValAssign, 16> ArgLocs;

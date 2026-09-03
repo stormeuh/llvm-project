@@ -69,6 +69,9 @@ private:
   /// Register with capability to stack passed arg struct
   Register StackPassedArgRegister = RISCV::C30;
 
+  /// Set to true if this function has any LittleCHERI secure calls.
+  bool HasSecureCalls = false;
+
 public:
   RISCVMachineFunctionInfo(const MachineFunction &MF) {}
 
@@ -117,6 +120,10 @@ public:
 
   Register getStackPassedArgRegister() const { return StackPassedArgRegister; }
   void setStackPassedArgRegister(Register Reg) { StackPassedArgRegister = Reg; }
+
+  /// Return true if the current function has any LittleCHERI secure function calls.
+  bool hasSecureCalls() const { return HasSecureCalls; }
+  void setHasSecureCalls(bool V) { HasSecureCalls = V; }
 };
 
 } // end namespace llvm

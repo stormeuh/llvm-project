@@ -690,6 +690,8 @@ void RISCVFrameLowering::emitArgumentSanitization(
   const RISCVInstrInfo *TII = STI.getInstrInfo();
   const RISCVRegisterInfo *RI = STI.getRegisterInfo();
   Register FPStashReg = RISCV::C20;
+  Register ArgsanThresholdReg = MF.getSubtarget<RISCVSubtarget>()
+      .getRegisterInfo()->getLittleCHERIArgsanThresholdReg();
 
   bool HasArguments = std::any_of(
     MF.getRegInfo().liveins().begin(), MF.getRegInfo().liveins().end(),
@@ -713,15 +715,24 @@ void RISCVFrameLowering::emitArgumentSanitization(
         .addReg(getSPReg() - RISCV::C0 + RISCV::X0)
         .addImm(FramePointerOffset);
   }
-
-  // call sanitization procedure
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCCALL))
-      .addExternalSymbol("__sanitize_passthrough_args", RISCVII::MO_CCALL)
+  
+  if (MF.getFunction().getCallingConv() == CallingConv::CHERI_Uninit) {
+    // call sanitization procedure unconditionally in secure call prologue
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCCALL))
+        .addExternalSymbol("__sanitize_passthrough_args", RISCVII::MO_CCALL)
+        .setMIFlag(MachineInstr::FrameSetup);
+  } else {
+    // otherwise let it depend on threshold
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoConditionalDoArgumentSanitization))
+      .addReg(ArgsanThresholdReg)
       .setMIFlag(MachineInstr::FrameSetup);
+  }
+  
 
   if (!hasFP(MF))
     BuildMI(MBB, MBBI, DL, TII->get(RISCV::CMove), getFPReg())
-      .addReg(FPStashReg);
+      .addReg(FPStashReg)
+      .setMIFlag(MachineInstr::FrameSetup);
 }
 
 void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
@@ -896,11 +907,11 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
 
   // Functions called with secure calling convention must do argument
   // sanitization (if enabled with console arg)
-  if (//MF.getFunction().getCallingConv() == CallingConv::CHERI_Uninit &&
-        CHERIUninitSanitizeArgs
-      && MFI.hasCalls()
+  if (CHERIUninitSanitizeArgs && (
+      (MF.getFunction().getCallingConv() == CallingConv::CHERI_Uninit ||
+      RVFI->hasSecureCalls())
       && !(MF.getFunction().hasFnAttribute(Attribute::LittleCHERINoArgsan))
-      ){
+    )){
       emitArgumentSanitization(MF, MBB, MBBI, DL, RealStackSize - RVFI->getVarArgsSaveSize());
   }
 

@@ -101,6 +101,9 @@ private:
   bool expandPseudoConditionalVoidStackTag(MachineBasicBlock &MBB,
                                            MachineBasicBlock::iterator MBBI,
                                            MachineBasicBlock::iterator &NextMBBI);
+  bool expandPseudoConditionalDoArgumentSanitization(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+    MachineBasicBlock::iterator &NextMBBI);
 };
 
 char RISCVExpandPseudo::ID = 0;
@@ -141,6 +144,8 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
     return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, false);
   case RISCV::PseudoConditionalVoidStackTag:
     return expandPseudoConditionalVoidStackTag(MBB, MBBI, NextMBBI);
+  case RISCV::PseudoConditionalDoArgumentSanitization:
+    return expandPseudoConditionalDoArgumentSanitization(MBB, MBBI, NextMBBI);
   case RISCV::PseudoClearRegs:
     return expandPseudoClearRegs(MBB, MBBI, NextMBBI);
   case RISCV::PseudoLLA:
@@ -745,6 +750,50 @@ bool RISCVExpandPseudo::expandPseudoConditionalVoidStackTag(
 
   BuildMI(MBB, MBBI, DL, TII->get(RISCV::CClearTag), StackReg)
     .addReg(StackReg);
+
+  NextMBBI = MBB.end();
+  MI.eraseFromParent();
+  return true;
+}
+
+bool RISCVExpandPseudo::expandPseudoConditionalDoArgumentSanitization(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+    MachineBasicBlock::iterator &NextMBBI) {
+  MachineFunction *MF = MBB.getParent();
+  const auto &STI = MBB.getParent()->getSubtarget<RISCVSubtarget>();
+  MachineInstr &MI = *MBBI;
+  auto DL = MI.getDebugLoc();
+  Register ThresholdReg = MI.getOperand(0).getReg();
+  Register StackReg = STI.getFrameLowering()->getSPReg();
+
+  // Create new basic block to jump over voiding tag
+  MachineBasicBlock *SkipArgsanMBB = MF->CreateMachineBasicBlock(MBB.getBasicBlock());
+
+  // // Bookkeeping to make sure MBB is placed correctly
+  SkipArgsanMBB->setLabelMustBeEmitted();
+  MF->insert(++MBB.getIterator(), SkipArgsanMBB);
+  // Move all the rest of the instructions to NewMBB.
+  SkipArgsanMBB->splice(SkipArgsanMBB->end(), &MBB, std::next(MBBI), MBB.end());
+  // Update machine-CFG edges.
+  SkipArgsanMBB->transferSuccessorsAndUpdatePHIs(&MBB);
+  // Make the original basic block fall-through to the new.
+  MBB.addSuccessor(SkipArgsanMBB);
+  // Make sure live-ins are correctly attached to this new basic block.
+  LivePhysRegs LiveRegs;
+  computeAndAddLiveIns(LiveRegs, *SkipArgsanMBB);
+
+  // if the condition is zero, do not clear tag
+  // beqz r_cond, skip_void_tag
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::BGEU))
+  .addReg(STI.getRegisterInfo()->getSubReg(StackReg, RISCV::sub_cap_addr))
+  .addReg(ThresholdReg)
+  .addMBB(SkipArgsanMBB)
+  .setMIFlags(MI.getFlags());
+
+  // call sanitization procedure
+  BuildMI(MBB, MBBI, DL, TII->get(RISCV::PseudoCCALL))
+      .addExternalSymbol("__sanitize_passthrough_args", RISCVII::MO_CCALL)
+      .setMIFlags(MI.getFlags());
 
   NextMBBI = MBB.end();
   MI.eraseFromParent();

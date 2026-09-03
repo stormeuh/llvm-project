@@ -413,6 +413,9 @@ def PseudoConditionalReplenishReserveStack : Pseudo<(outs), (ins GPR:$thr, GPR:$
 let hasSideEffects = 0, mayLoad = 0, mayStore = 0, isBranch = 1, Uses = [C2], Defs = [C2], usesCustomInserter = 1 in
 def PseudoConditionalVoidStackTag : Pseudo<(outs), (ins GPR:$thr), []>;
 
+let hasSideEffects = 1, mayLoad = 1, mayStore = 1, isBranch = 1, Uses = [X2], usesCustomInserter = 1 in
+def PseudoConditionalDoArgumentSanitization : Pseudo<(outs), (ins GPR:$thr), []>;
+
 }
 
 def : InstAlias<"cincoffsetimm $cd, $cs1, $imm",

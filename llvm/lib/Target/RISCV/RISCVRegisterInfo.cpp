@@ -442,3 +442,7 @@ unsigned
 RISCVRegisterInfo::getRegisterCostTableIndex(const MachineFunction &MF) const {
   return MF.getSubtarget<RISCVSubtarget>().hasStdExtC() ? 1 : 0;
 }
+
+Register RISCVRegisterInfo::getLittleCHERIArgsanThresholdReg(void) const {
+  return RISCV::X3;
+}

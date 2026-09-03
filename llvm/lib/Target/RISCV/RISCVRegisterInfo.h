@@ -72,6 +72,7 @@ struct RISCVRegisterInfo : public RISCVGenRegisterInfo {
 
   bool requiresRegisterClearing(void) const;
   bool hasReducedCalleeSavedRegisters(void) const;
+  Register getLittleCHERIArgsanThresholdReg(void) const;
 };
 }
 
