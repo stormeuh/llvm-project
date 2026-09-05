@@ -1957,12 +1957,12 @@ def PseudoCCALLCustomRA : Pseudo<(outs GPCR:$rd),
 let Predicates = [HasCheri, IsCapMode, IsPureCapABI] in
 let isCall = 1, isCodeGenOnly = 1, Size = 12, hasSideEffects = 0, 
     mayStore = 0, mayLoad = 1, Defs = [C2] in
-def PseudoCCALLIndirectSentry : Pseudo<(outs GPCR:$rd),(ins pseudo_cap_jump_symbol:$target), []>;
+def PseudoLittleCHERICCALL : Pseudo<(outs GPCR:$rd),(ins pseudo_cap_jump_symbol:$target), []>;
 
 let Predicates = [HasCheri, IsCapMode, IsPureCapABI] in
 let isCall = 1, isCodeGenOnly = 1, Size = 16, hasSideEffects = 0, 
     mayStore = 0, mayLoad = 1, Defs = [C2, C8] in
-def PseudoCCALLIndirectSentryFP : Pseudo<(outs GPCR:$rd),
+def PseudoLittleCHERICCALLFP : Pseudo<(outs GPCR:$rd),
                          (ins pseudo_cap_jump_symbol:$target), []>;
 
 let Predicates = [HasCheri, IsCapMode, IsPureCapABI] in

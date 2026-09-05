@@ -10711,19 +10711,11 @@ emitPseudoUCCALL(MachineInstr &MI, MachineBasicBlock *BB,
   
   Register ArgsanThresholdReg = ST.getRegisterInfo()->getLittleCHERIArgsanThresholdReg();
 
-  // Registers
-  // Register StackCapReg = RISCV::C2;
-  // Register FrameCapReg = RISCV::C8;
-  // Register IDC = RISCV::C31;
-
   int CallOpc; 
-  if (Subtarget.getCHERIUninitEncap() == RISCVSubtarget::isentry)
     if (TFL->hasFP(MF))
-      CallOpc = RISCV::PseudoCCALLIndirectSentryFP;
+    CallOpc = RISCV::PseudoLittleCHERICCALLFP;
     else 
-      CallOpc = RISCV::PseudoCCALLIndirectSentry;
-  else 
-    CallOpc = RISCV::PseudoCCALLCustomRA;
+    CallOpc = RISCV::PseudoLittleCHERICCALL;
 
   // Emit jump, supply register for auipcc, same as used by ccall
   MachineInstr *JumpInst = BuildMI(MBB, MBBI, DL, 
@@ -12400,16 +12392,6 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     if (Glue.getNode()) Ops.push_back(Glue);
     SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
     Chain = DAG.getNode(RISCVISD::CLEAR_REGS, DL, NodeTys, Ops);
-    Glue = Chain.getValue(1);
-  }
-
-    // Emit stack cap shrinking node
-  if (CallConv == CallingConv::CHERI_Uninit && CHERIUninitStackSplit) {
-    Chain = DAG.getNode(RISCVISD::CAP_SHRINK_STACK, DL, {MVT::Other, MVT::Glue}, {
-      Chain
-    , DAG.getConstant(0, DL, XLenVT)
-    , Glue
-    });
     Glue = Chain.getValue(1);
   }
 

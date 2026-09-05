@@ -33,6 +33,11 @@ using namespace llvm;
 
 namespace {
 
+static cl::opt<bool>
+    CHERIUninitStackSplit("cheri-uninit-stack-split",
+    cl::desc("Split stack on caller-callee boundary upon call for uninit CC"),
+    cl::init(true));
+
 class RISCVExpandPseudo : public MachineFunctionPass {
 public:
   const RISCVInstrInfo *TII;
@@ -92,7 +97,7 @@ private:
   bool expandPseudoClearRegs(MachineBasicBlock &MBB,
                              MachineBasicBlock::iterator MBBI,
                              MachineBasicBlock::iterator &NextMBBI);
-  bool expandPseudoCCALLIndirectSentry(MachineBasicBlock &MBB,
+  bool expandPseudoLittleCHERICCALL(MachineBasicBlock &MBB,
                           MachineBasicBlock::iterator MBBI,
                           MachineBasicBlock::iterator &NextMBBI, bool HasFP);
   bool expandPseudoConditionalReplenishReserveStack(MachineBasicBlock &MBB,
@@ -138,10 +143,10 @@ bool RISCVExpandPseudo::expandMI(MachineBasicBlock &MBB,
   switch (MBBI->getOpcode()) {
   case RISCV::PseudoConditionalReplenishReserveStack:
     return expandPseudoConditionalReplenishReserveStack(MBB, MBBI, NextMBBI);
-  case RISCV::PseudoCCALLIndirectSentryFP:
-    return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, true);
-  case RISCV::PseudoCCALLIndirectSentry:
-    return expandPseudoCCALLIndirectSentry(MBB, MBBI, NextMBBI, false);
+  case RISCV::PseudoLittleCHERICCALLFP:
+    return expandPseudoLittleCHERICCALL(MBB, MBBI, NextMBBI, true);
+  case RISCV::PseudoLittleCHERICCALL:
+    return expandPseudoLittleCHERICCALL(MBB, MBBI, NextMBBI, false);
   case RISCV::PseudoConditionalVoidStackTag:
     return expandPseudoConditionalVoidStackTag(MBB, MBBI, NextMBBI);
   case RISCV::PseudoConditionalDoArgumentSanitization:
@@ -587,20 +592,34 @@ bool RISCVExpandPseudo::expandVRELOAD(MachineBasicBlock &MBB,
   return true;
 }
 
-bool RISCVExpandPseudo::expandPseudoCCALLIndirectSentry(MachineBasicBlock &MBB,
+bool RISCVExpandPseudo::expandPseudoLittleCHERICCALL(MachineBasicBlock &MBB,
                           MachineBasicBlock::iterator MBBI,
                           MachineBasicBlock::iterator &NextMBBI, bool HasFP) {
   MachineFunction *MF = MBB.getParent();
   MachineInstr &MI = *MBBI;
   DebugLoc DL = MBBI->getDebugLoc();
-  const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+  const auto &STI = MBB.getParent()->getSubtarget<RISCVSubtarget>();
+  const TargetInstrInfo *TII = STI.getInstrInfo();
   
   // Registers
   Register StackCapReg = RISCV::C2;
   Register FrameCapReg = RISCV::C8;
   Register IDC = RISCV::C31;
 
-  // Replace PseudoCCALLIndirectSentry with PseudoCCALLCustomRA, keep everything else
+  if (CHERIUninitStackSplit) {
+    Register StackCapReg = RISCV::C2;
+    Register TempReg = RISCV::X6;
+    
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CShrinkImm), StackCapReg)
+          .addReg(StackCapReg)
+          .addImm(0);
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CGetTop), TempReg)
+        .addReg(StackCapReg);
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CSetAddr), StackCapReg)
+        .addReg(StackCapReg).addReg(TempReg);
+  }
+
+  // Replace PseudoLittleCHERICCALL with PseudoCCALLCustomRA, keep everything else
   MachineInstr *JumpInst = BuildMI(MBB, MBBI, DL, 
     TII->get(RISCV::PseudoCCALLCustomRA), MI.getOperand(0).getReg());
   JumpInst->addOperand(MI.getOperand(1));
@@ -610,12 +629,14 @@ bool RISCVExpandPseudo::expandPseudoCCALLIndirectSentry(MachineBasicBlock &MBB,
   for (auto OpIdx = 2u; OpIdx < MI.getNumOperands(); OpIdx++)
     JumpInst->addOperand(MI.getOperand(OpIdx));
 
-  // now emit instructions to restore cfp and csp
-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), StackCapReg)
-    .addReg(IDC).addImm(16);
-  if (HasFP)
-    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), FrameCapReg)
-      .addReg(IDC).addImm(-16);
+  if (STI.getCHERIUninitEncap() == RISCVSubtarget::isentry){
+    // now emit instructions to restore cfp and csp
+    BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), StackCapReg)
+      .addReg(IDC).addImm(16);
+    if (HasFP)
+      BuildMI(MBB, MBBI, DL, TII->get(RISCV::CLC_128), FrameCapReg)
+        .addReg(IDC).addImm(-16);
+  }
 
   MI.eraseFromParent();
   return true;
