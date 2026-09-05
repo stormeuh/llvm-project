@@ -73,11 +73,6 @@ static cl::opt<bool>
                                            "pure-capability function calls"),
                                   cl::init(false), cl::Hidden);
 
-static cl::opt<bool>
-    CHERIUninitStackSplit("cheri-uninit-stack-split",
-    cl::desc("Split stack on caller-callee boundary upon call for uninit CC"),
-    cl::init(true));
-
 static cl::opt<bool> CHERIInstrumentSecureCalls(
     "cheri-instrument-secure-calls",
     cl::desc("Count number of secure calls made during execution"), cl::init(false));
@@ -10712,9 +10707,9 @@ emitPseudoUCCALL(MachineInstr &MI, MachineBasicBlock *BB,
   Register ArgsanThresholdReg = ST.getRegisterInfo()->getLittleCHERIArgsanThresholdReg();
 
   int CallOpc; 
-    if (TFL->hasFP(MF))
+  if (TFL->hasFP(MF))
     CallOpc = RISCV::PseudoLittleCHERICCALLFP;
-    else 
+  else 
     CallOpc = RISCV::PseudoLittleCHERICCALL;
 
   // Emit jump, supply register for auipcc, same as used by ccall
@@ -11951,7 +11946,8 @@ bool RISCVTargetLowering::isEligibleForTailCallOptimization(
     return false;
 
   // Tail calls are not supported by this secure calling convention
-  if (CalleeCC == CallingConv::CHERI_Uninit)
+  if (CalleeCC == CallingConv::CHERI_Uninit ||
+      CallerCC == CallingConv::CHERI_Uninit)
     return false;
 
   // Do not tail call opt if the stack is used to pass parameters.
@@ -12011,12 +12007,9 @@ static Align getPrefTypeAlign(EVT VT, SelectionDAG &DAG) {
       VT.getTypeForEVT(*DAG.getContext()));
 }
 
-static SDValue EmitIncrementSecureCallInstrumentation(MachineFunction &MF, SelectionDAG &DAG, SDLoc &DL, EVT PtrVT, SDValue Chain) {
-  Module *M = MF.getFunction().getParent();
-  EVT ValVT = MVT::i64;
-
+static GlobalVariable *GetGlobalVariableReferenceByName(Module *M, StringRef Name) {
   GlobalVariable *GV = dyn_cast_or_null<GlobalVariable>(
-    M->getNamedGlobal("_uninit_call_count"));
+    M->getNamedGlobal(Name));
 
   if (!GV) {
     GV = new GlobalVariable(
@@ -12025,18 +12018,74 @@ static SDValue EmitIncrementSecureCallInstrumentation(MachineFunction &MF, Selec
         false,                    // isConstant
         GlobalValue::ExternalLinkage,
         nullptr,                  // no initializer = external declaration
-        "_uninit_call_count");
+        Name);
   }
 
-  SDValue Ptr = DAG.getGlobalAddress(GV, DL, PtrVT);
-  SDValue Load = DAG.getLoad(ValVT, DL, Chain, Ptr,
-                             MachinePointerInfo(GV));
-  SDValue One = DAG.getConstant(1, DL, ValVT);
-  SDValue Add = DAG.getNode(ISD::ADD, DL, ValVT, Load, One);
-  SDValue Store = DAG.getStore(Load.getValue(1), DL, Add, Ptr,
-                               MachinePointerInfo(GV));
+  return GV;
+}
 
-  return Store;
+static SDValue EmitSecureCallInstrumentation(MachineFunction &MF, SelectionDAG &DAG, SDLoc &DL, EVT PtrVT, SDValue Chain) {
+  Module *M = MF.getFunction().getParent();
+  EVT ValVT = MVT::i64;
+  SmallVector<SDValue, 3> OutChains;
+  SDValue One = DAG.getConstant(1, DL, ValVT);
+
+  
+  GlobalVariable *CountGlobal = GetGlobalVariableReferenceByName(M, "_uninit_call_count");
+  SDValue CountPtr = DAG.getGlobalAddress(CountGlobal, DL, PtrVT);
+  SDValue Count = DAG.getLoad(ValVT, DL, Chain, CountPtr,
+                             MachinePointerInfo(CountGlobal));
+  SDValue NewCount = DAG.getNode(ISD::ADD, DL, ValVT, Count, One);
+  SDValue CountStore = DAG.getStore(Count.getValue(1), DL, NewCount, CountPtr,
+                             MachinePointerInfo(CountGlobal));
+  OutChains.push_back(CountStore);
+  
+  GlobalVariable *CurrentDepthGlobal = 
+      GetGlobalVariableReferenceByName(M, "_littlecheri_call_current_depth");
+  SDValue CurrentDepthPtr = DAG.getGlobalAddress(CurrentDepthGlobal, DL, PtrVT);
+  SDValue CurrentDepth = DAG.getLoad(ValVT, DL, Chain, CurrentDepthPtr,
+                             MachinePointerInfo(CurrentDepthGlobal));
+  SDValue NewDepth = DAG.getNode(ISD::ADD, DL, ValVT, CurrentDepth, One);
+  SDValue NewDepthStore = DAG.getStore(CurrentDepth.getValue(1), DL, NewDepth,
+      CurrentDepthPtr, MachinePointerInfo(CurrentDepthGlobal));
+  OutChains.push_back(NewDepthStore);
+
+  GlobalVariable *MaxDepthGlobal = 
+      GetGlobalVariableReferenceByName(M, "_littlecheri_call_max_depth");
+  SDValue MaxDepthPtr = DAG.getGlobalAddress(MaxDepthGlobal, DL, PtrVT);
+  SDValue MaxDepth = DAG.getLoad(ValVT, DL, Chain, MaxDepthPtr,
+                             MachinePointerInfo(MaxDepthGlobal));
+  SDValue NewMaxDepth = DAG.getSelectCC(DL, NewDepth, MaxDepth, 
+      NewDepth, MaxDepth, ISD::SETGE);
+  
+  SDValue MaxDepthStore = DAG.getStore(MaxDepth.getValue(1), DL, 
+      NewMaxDepth, MaxDepthPtr, MachinePointerInfo(MaxDepthGlobal));
+  OutChains.push_back(MaxDepthStore);
+
+  SDValue CombinedChain = DAG.getTokenFactor(DL, OutChains);
+
+  return CombinedChain;
+}
+
+static SDValue EmitSecureReturnInstrumentation(MachineFunction &MF, SelectionDAG &DAG, SDLoc &DL, EVT PtrVT, SDValue Chain) {
+  Module *M = MF.getFunction().getParent();
+  EVT ValVT = MVT::i64;
+  SmallVector<SDValue, 3> OutChains;
+  SDValue One = DAG.getConstant(1, DL, ValVT);
+  
+  GlobalVariable *CurrentDepthGlobal = 
+      GetGlobalVariableReferenceByName(M, "_littlecheri_call_current_depth");
+  SDValue CurrentDepthPtr = DAG.getGlobalAddress(CurrentDepthGlobal, DL, PtrVT);
+  SDValue CurrentDepth = DAG.getLoad(ValVT, DL, Chain, CurrentDepthPtr,
+                             MachinePointerInfo(CurrentDepthGlobal));
+  SDValue NewDepth = DAG.getNode(ISD::SUB, DL, ValVT, CurrentDepth, One);
+  SDValue NewDepthStore = DAG.getStore(CurrentDepth.getValue(1), DL, NewDepth,
+      CurrentDepthPtr, MachinePointerInfo(CurrentDepthGlobal));
+  OutChains.push_back(NewDepthStore);
+
+  SDValue CombinedChain = DAG.getTokenFactor(DL, OutChains);
+
+  return CombinedChain;
 }
 
 // Lower a call to a callseq_start + CALL + callseq_end chain, and add input
@@ -12286,7 +12335,7 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     Chain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, MemOpChains);
 
   if (CallConv == CallingConv::CHERI_Uninit && CHERIInstrumentSecureCalls)
-    Chain = EmitIncrementSecureCallInstrumentation(MF, DAG, DL, PtrVT, Chain);
+    Chain = EmitSecureCallInstrumentation(MF, DAG, DL, PtrVT, Chain);
 
   SDValue Glue;
 
@@ -12491,6 +12540,9 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     Chain =
         DAG.getCopyToReg(Chain, DL, RISCV::C31, SpilledReserveStackReg);
   }
+
+  if (CallConv == CallingConv::CHERI_Uninit && CHERIInstrumentSecureCalls)
+    Chain = EmitSecureReturnInstrumentation(MF, DAG, DL, PtrVT, Chain);
 
   return Chain;
 }
