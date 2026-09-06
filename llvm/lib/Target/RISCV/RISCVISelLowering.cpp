@@ -11382,6 +11382,8 @@ static SDValue unpackFromMemLoc(SelectionDAG &DAG, SDValue Chain,
                                 const CCValAssign &VA, const SDLoc &DL,
                                 EVT PtrVT) {
   MachineFunction &MF = DAG.getMachineFunction();
+  const RISCVSubtarget &Subtarget = MF.getSubtarget<RISCVSubtarget>();
+  RISCVMachineFunctionInfo *FuncInfo = MF.getInfo<RISCVMachineFunctionInfo>();
   MachineFrameInfo &MFI = MF.getFrameInfo();
   EVT LocVT = VA.getLocVT();
   EVT ValVT = VA.getValVT();
@@ -11391,9 +11393,22 @@ static SDValue unpackFromMemLoc(SelectionDAG &DAG, SDValue Chain,
     // type, instead of the scalable vector type.
     ValVT = LocVT;
   }
-  int FI = MFI.CreateFixedObject(ValVT.getStoreSize(), VA.getLocMemOffset(),
+
+  MachinePointerInfo ValPtrInfo = MachinePointerInfo();
+  SDValue ValPtr;
+  SDValue OutChain = Chain;
+
+  // These cases always pass a pointer to a struct containing args in memlocs
+  if (Subtarget.hasUninitStack() || Subtarget.hasReserveStack()) {
+    // ValPtrInfo = MachinePointerInfo::getAddrSpace(200);
+    ValPtr = DAG.getCopyFromReg(Chain, DL, FuncInfo->getStackPassedArgRegister(), PtrVT);
+    OutChain = ValPtr.getValue(1);
+  } else {
+    int FI = MFI.CreateFixedObject(ValVT.getStoreSize(), VA.getLocMemOffset(),
                                  /*IsImmutable=*/true);
-  SDValue FIN = DAG.getFrameIndex(FI, PtrVT);
+    ValPtrInfo = MachinePointerInfo::getFixedStack(DAG.getMachineFunction(), FI);
+    ValPtr = DAG.getFrameIndex(FI, PtrVT);
+  }
   SDValue Val;
 
   ISD::LoadExtType ExtType;
@@ -11407,8 +11422,7 @@ static SDValue unpackFromMemLoc(SelectionDAG &DAG, SDValue Chain,
     break;
   }
   Val = DAG.getExtLoad(
-      ExtType, DL, LocVT, Chain, FIN,
-      MachinePointerInfo::getFixedStack(DAG.getMachineFunction(), FI), ValVT);
+      ExtType, DL, LocVT, OutChain, ValPtr, ValPtrInfo, ValVT);
   return Val;
 }
 
@@ -11808,6 +11822,7 @@ SDValue RISCVTargetLowering::LowerFormalArguments(
                      CallConv == CallingConv::Fast ? CC_RISCV_FastCC
                                                    : CC_RISCV);
 
+  bool HasStackPassedArgs = false;
   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
     CCValAssign &VA = ArgLocs[i];
     SDValue ArgValue;
@@ -11817,8 +11832,11 @@ SDValue RISCVTargetLowering::LowerFormalArguments(
       ArgValue = unpackF64OnRV32DSoftABI(DAG, Chain, VA, DL, PtrVT);
     else if (VA.isRegLoc())
       ArgValue = unpackFromRegLoc(DAG, Chain, VA, DL, *this);
-    else
+    else {
+      HasStackPassedArgs = true;
       ArgValue = unpackFromMemLoc(DAG, Chain, VA, DL, PtrVT);
+    }
+      
 
     if (VA.getLocInfo() == CCValAssign::Indirect) {
       // If the original argument was split and passed by reference (e.g. i128
@@ -11849,19 +11867,19 @@ SDValue RISCVTargetLowering::LowerFormalArguments(
 
   MachineFrameInfo &MFI = MF.getFrameInfo();
   unsigned XLenInBytes = Subtarget.getXLen() / 8;
-  if (IsVarArg && RISCVABI::isCheriPureCapABI(Subtarget.getTargetABI())) {
-    if (IsVarArg && (Subtarget.hasUninitStack() || Subtarget.hasReserveStack())) {
+  // All stack passed args get put in struct which is passed through a special register for LittleCHERI
+  if ((IsVarArg || HasStackPassedArgs) && 
+      (Subtarget.hasUninitStack() || Subtarget.hasReserveStack())) {
       Register StackPassedArgRegister = RVFI->getStackPassedArgRegister();
       DAG.getRegister(StackPassedArgRegister, PtrVT);
       CCInfo.AllocateReg(StackPassedArgRegister);
       RegInfo.addLiveIn(StackPassedArgRegister);
-    } else {
-      // Record the frame index of the first variable argument
-      // which is a value necessary to VASTART.
-      int FI = MFI.CreateFixedObject(XLenInBytes, CCInfo.getNextStackOffset(),
-                                    true);
-      RVFI->setVarArgsFrameIndex(FI);
-    }
+  } else if (IsVarArg && RISCVABI::isCheriPureCapABI(Subtarget.getTargetABI())) {
+    // Record the frame index of the first variable argument
+    // which is a value necessary to VASTART.
+    int FI = MFI.CreateFixedObject(XLenInBytes, CCInfo.getNextStackOffset(),
+                                  true);
+    RVFI->setVarArgsFrameIndex(FI);
   } else if (IsVarArg) {
     ArrayRef<MCPhysReg> ArgRegs = makeArrayRef(ArgGPRs);
     unsigned Idx = CCInfo.getFirstUnallocated(ArgRegs);
@@ -12303,8 +12321,9 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
       SDValue Address =
           DAG.getPointerAdd(DL, StackPtr, VA.getLocMemOffset());
-      if (VA.getLocMemOffset() > StackPassedArgStructSize) 
-        StackPassedArgStructSize = VA.getLocMemOffset();
+      uint64_t LocMemoffsetTop = VA.getLocMemOffset() + VA.getLocVT().getStoreSize();
+      if (LocMemoffsetTop > StackPassedArgStructSize) 
+        StackPassedArgStructSize = LocMemoffsetTop;
 
       // Emit the store.
       MemOpChains.push_back(
@@ -12312,7 +12331,7 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     }
   }
 
-  if (IsVarArg && (Subtarget.hasUninitStack() || Subtarget.hasReserveStack())) {
+  if (StackPassedArgStructSize && (Subtarget.hasUninitStack() || Subtarget.hasReserveStack())) {
     if (!StackPtr.getNode())
       StackPtr = DAG.getCopyFromReg(
           Chain, DL, getStackPointerRegisterToSaveRestore(), PtrVT);
